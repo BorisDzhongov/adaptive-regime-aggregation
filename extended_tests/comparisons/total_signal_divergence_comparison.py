@@ -7,6 +7,10 @@ X_I = 0.20
 ANCHOR = 0.50
 PHI = 1.61803398875
 
+# Optional reliability assumptions for a stronger benchmark
+REL_D = 0.35
+REL_I = 0.65
+
 REGIMES = {
     "phi_inv2": 1 / (PHI ** 2),
     "phi_inv": 1 / PHI,
@@ -16,9 +20,21 @@ REGIMES = {
 }
 
 
-def ara_balance(x_d, x_i, alpha):
-    return (x_d + alpha * x_i) / (1.0 + alpha)
+def abs_error(x, truth):
+    return abs(x - truth)
 
+
+def interpretation(x, anchor=ANCHOR):
+    if abs(x - anchor) < 1e-12:
+        return "exact anchor balance"
+    if x > anchor:
+        return "leans toward data subsystem"
+    return "leans toward intuition subsystem"
+
+
+# -----------------------------
+# Baseline methods
+# -----------------------------
 
 def arithmetic_mean(x_d, x_i):
     return 0.5 * (x_d + x_i)
@@ -29,7 +45,7 @@ def linear_opinion_pool(x_d, x_i, w_d=0.5):
     return w_d * x_d + w_i * x_i
 
 
-def log_pool(x_d, x_i, w_d=0.5, eps=1e-12):
+def logarithmic_opinion_pool(x_d, x_i, w_d=0.5, eps=1e-12):
     """
     Equal-weight logarithmic pooling for probabilities in (0,1).
     """
@@ -42,27 +58,72 @@ def log_pool(x_d, x_i, w_d=0.5, eps=1e-12):
     return num / den
 
 
-def abs_error(x, truth):
-    return abs(x - truth)
+def winner_takes_most(x_d, x_i):
+    """
+    Chooses the more extreme/confident subsystem.
+    In this scenario, confidence is proxied by distance from anchor.
+    """
+    d_conf = abs(x_d - ANCHOR)
+    i_conf = abs(x_i - ANCHOR)
+    return x_d if d_conf >= i_conf else x_i
 
 
-def interpretation(x):
-    if abs(x - ANCHOR) < 1e-12:
-        return "exact anchor balance"
-    if x > ANCHOR:
-        return "leans toward data subsystem"
-    return "leans toward intuition subsystem"
+def closest_to_anchor_selector(x_d, x_i):
+    """
+    Chooses the subsystem already closer to the anchor.
+    """
+    d_dist = abs(x_d - ANCHOR)
+    i_dist = abs(x_i - ANCHOR)
+    return x_d if d_dist <= i_dist else x_i
 
 
-def print_method_block(method_name, output_value):
+def reliability_weighted_pool(x_d, x_i, rel_d=REL_D, rel_i=REL_I):
+    total = rel_d + rel_i
+    if total <= 0:
+        raise ValueError("Reliabilities must sum to a positive value.")
+    w_d = rel_d / total
+    w_i = rel_i / total
+    return w_d * x_d + w_i * x_i
+
+
+# -----------------------------
+# ARA
+# -----------------------------
+
+def ara_balance(x_d, x_i, alpha):
+    return (x_d + alpha * x_i) / (1.0 + alpha)
+
+
+# -----------------------------
+# Reporting helpers
+# -----------------------------
+
+def evaluate_method(method_name, output_value, regime="", alpha=""):
     err_true = abs_error(output_value, TRUE_STATE)
     err_anchor = abs_error(output_value, ANCHOR)
 
-    print(f"\nMethod: {method_name}")
-    print(f"Output = {output_value:.6f}")
-    print(f"|output - true_state| = {err_true:.6f}")
-    print(f"|output - anchor|     = {err_anchor:.6f}")
-    print(f"Interpretation: {interpretation(output_value)}")
+    return {
+        "method": method_name,
+        "regime": regime,
+        "alpha": alpha,
+        "x_d": X_D,
+        "x_i": X_I,
+        "true_state": TRUE_STATE,
+        "anchor": ANCHOR,
+        "output": round(output_value, 6),
+        "abs_error_true_state": round(err_true, 6),
+        "abs_error_anchor": round(err_anchor, 6),
+        "interpretation": interpretation(output_value),
+    }
+
+
+def print_result_block(result):
+    print(f"\nMethod: {result['method']}" if result["regime"] == "" else
+          f"\nMethod: {result['method']} | Regime: {result['regime']} (alpha={result['alpha']})")
+    print(f"Output = {result['output']:.6f}")
+    print(f"|output - true_state| = {result['abs_error_true_state']:.6f}")
+    print(f"|output - anchor|     = {result['abs_error_anchor']:.6f}")
+    print(f"Interpretation: {result['interpretation']}")
 
 
 def main():
@@ -70,93 +131,82 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "total_signal_divergence_comparison.csv"
 
-    rows = []
-
-    print("\nARA Boundary Comparison Test: Extreme Asymmetric Conflict")
-    print("=" * 62)
+    print("\nARA Boundary Benchmark: Extreme Asymmetric Conflict")
+    print("=" * 66)
     print(f"True state: {TRUE_STATE:.2f}")
     print(f"Data subsystem (x_d): {X_D:.2f}")
     print(f"Intuition subsystem (x_i): {X_I:.2f}")
     print(f"Anchor: {ANCHOR:.2f}")
+    print(f"Reliability assumptions: rel_d={REL_D:.2f}, rel_i={REL_I:.2f}")
+
     print("\nScenario summary:")
     print("- strong data-side extremity")
     print("- lower but non-symmetric intuition signal")
     print("- neutral truth/anchor used as reference")
     print("- intended to differentiate aggregation behavior under boundary stress")
 
-    # Baseline methods
-    mean_val = arithmetic_mean(X_D, X_I)
-    lop_val = linear_opinion_pool(X_D, X_I, w_d=0.5)
-    log_val = log_pool(X_D, X_I, w_d=0.5)
+    rows = []
 
-    print("\nBaseline methods")
-    print("-" * 62)
-    print_method_block("Arithmetic mean", mean_val)
-    print_method_block("Linear opinion pool (equal weights)", lop_val)
-    print_method_block("Logarithmic pool (equal weights)", log_val)
+    # -----------------------------
+    # Standard baselines
+    # -----------------------------
+    print("\nStandard baseline methods")
+    print("-" * 66)
 
-    baseline_methods = [
-        ("Arithmetic mean", mean_val),
-        ("Linear opinion pool (equal weights)", lop_val),
-        ("Logarithmic pool (equal weights)", log_val),
+    baseline_results = [
+        evaluate_method("Arithmetic mean", arithmetic_mean(X_D, X_I)),
+        evaluate_method("Linear opinion pool (equal weights)", linear_opinion_pool(X_D, X_I, 0.5)),
+        evaluate_method("Logarithmic opinion pool (equal weights)", logarithmic_opinion_pool(X_D, X_I, 0.5)),
+        evaluate_method("Winner-takes-most selector", winner_takes_most(X_D, X_I)),
+        evaluate_method("Closest-to-anchor selector", closest_to_anchor_selector(X_D, X_I)),
+        evaluate_method(
+            "Reliability-weighted linear pool",
+            reliability_weighted_pool(X_D, X_I, REL_D, REL_I),
+        ),
     ]
 
-    for method_name, output_value in baseline_methods:
-        rows.append({
-            "method": method_name,
-            "regime": "baseline",
-            "alpha": "",
-            "x_d": X_D,
-            "x_i": X_I,
-            "true_state": TRUE_STATE,
-            "anchor": ANCHOR,
-            "output": round(output_value, 6),
-            "abs_error_true_state": round(abs_error(output_value, TRUE_STATE), 6),
-            "abs_error_anchor": round(abs_error(output_value, ANCHOR), 6),
-            "interpretation": interpretation(output_value),
-        })
+    for result in baseline_results:
+        print_result_block(result)
+        rows.append(result)
 
+    # -----------------------------
     # ARA across regimes
+    # -----------------------------
     print("\nARA across regimes")
-    print("-" * 62)
+    print("-" * 66)
 
     ara_results = []
-
     for regime_name, alpha in REGIMES.items():
-        x_b = ara_balance(X_D, X_I, alpha)
-        err_true = abs_error(x_b, TRUE_STATE)
-        err_anchor = abs_error(x_b, ANCHOR)
+        output_value = ara_balance(X_D, X_I, alpha)
+        result = evaluate_method("ARA", output_value, regime=regime_name, alpha=round(alpha, 10))
+        print_result_block(result)
+        rows.append(result)
+        ara_results.append(result)
 
-        print(f"\nRegime: {regime_name} (alpha={alpha:.6f})")
-        print(f"Output = {x_b:.6f}")
-        print(f"|output - true_state| = {err_true:.6f}")
-        print(f"|output - anchor|     = {err_anchor:.6f}")
-        print(f"Interpretation: {interpretation(x_b)}")
+    # -----------------------------
+    # Summary
+    # -----------------------------
+    best_baseline = min(baseline_results, key=lambda r: r["abs_error_true_state"])
+    best_ara = min(ara_results, key=lambda r: r["abs_error_true_state"])
+    best_overall = min(rows, key=lambda r: r["abs_error_true_state"])
 
-        ara_results.append((regime_name, alpha, x_b, err_true, err_anchor))
-
-        rows.append({
-            "method": "ARA",
-            "regime": regime_name,
-            "alpha": round(alpha, 10),
-            "x_d": X_D,
-            "x_i": X_I,
-            "true_state": TRUE_STATE,
-            "anchor": ANCHOR,
-            "output": round(x_b, 6),
-            "abs_error_true_state": round(err_true, 6),
-            "abs_error_anchor": round(err_anchor, 6),
-            "interpretation": interpretation(x_b),
-        })
-
-    best_regime = min(ara_results, key=lambda t: t[3])
-
-    print("\nARA summary")
-    print("-" * 62)
+    print("\nSummary")
+    print("-" * 66)
     print(
-        f"Closest ARA regime to true state: {best_regime[0]} "
-        f"(alpha={best_regime[1]:.6f}, output={best_regime[2]:.6f}, "
-        f"abs_error={best_regime[3]:.6f})"
+        f"Best baseline: {best_baseline['method']} | "
+        f"output={best_baseline['output']:.6f} | "
+        f"abs_error={best_baseline['abs_error_true_state']:.6f}"
+    )
+    print(
+        f"Best ARA regime: {best_ara['regime']} | "
+        f"output={best_ara['output']:.6f} | "
+        f"abs_error={best_ara['abs_error_true_state']:.6f}"
+    )
+    print(
+        f"Best overall performer: {best_overall['method']}"
+        + (f" [{best_overall['regime']}]" if best_overall["regime"] else "")
+        + f" | output={best_overall['output']:.6f}"
+        + f" | abs_error={best_overall['abs_error_true_state']:.6f}"
     )
 
     with open(out_file, "w", newline="", encoding="utf-8") as f:
