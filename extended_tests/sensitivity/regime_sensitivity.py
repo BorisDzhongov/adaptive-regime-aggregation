@@ -1,9 +1,9 @@
-import math
 import csv
 from pathlib import Path
 
 # Fixed deterministic scores from Example II
-# Replace these later if you want to connect directly to the core ARA code.
+# Extended exploratory test only; separate from the Zenodo paper pipeline.
+
 PROJECTS = ["A", "B", "C", "D"]
 
 G = {
@@ -21,20 +21,21 @@ I = {
 }
 
 ANCHOR = 5.0
+PHI = 1.61803398875
 
 REGIMES = {
-    "phi_inv2": 1 / (1.61803398875 ** 2),
-    "phi_inv": 1 / 1.61803398875,
+    "phi_inv2": 1 / (PHI ** 2),
+    "phi_inv": 1 / PHI,
     "one": 1.0,
-    "phi": 1.61803398875,
-    "phi2": 1.61803398875 ** 2,
+    "phi": PHI,
+    "phi2": PHI ** 2,
 }
 
 
 def ara_score(g_values, i_values, alpha, anchor=5.0):
     """
-    Simple deterministic coordination score for exploratory regime scan.
-    This is an extended test, not the official paper pipeline.
+    Simple deterministic exploratory coordination score.
+    This is an extended test and does not replace the official paper pipeline.
     """
     total = 0.0
     for g, i in zip(g_values, i_values):
@@ -54,23 +55,31 @@ def main():
     out_file = out_dir / "regime_sensitivity_scores.csv"
 
     rows = []
+
+    print("\nARA Regime Sensitivity Results")
+    print("=" * 40)
+
     for regime_name, alpha in REGIMES.items():
         scores = {}
-        for p in PROJECTS:
-            scores[p] = ara_score(G[p], I[p], alpha, ANCHOR)
+        for project in PROJECTS:
+            scores[project] = ara_score(G[project], I[project], alpha, ANCHOR)
 
         ranking = rank_scores(scores)
         winner = ranking[0][0]
 
+        print(f"\nRegime: {regime_name} (alpha={alpha:.6f})")
         for rank, (project, score) in enumerate(ranking, start=1):
+            print(f"{rank}. {project}  score={score:.6f}")
             rows.append({
                 "regime": regime_name,
-                "alpha": alpha,
+                "alpha": round(alpha, 10),
                 "project": project,
                 "score": round(score, 6),
                 "rank": rank,
                 "winner": winner,
             })
+
+        print(f"Winner: {winner}")
 
     with open(out_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
@@ -80,7 +89,7 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"Saved: {out_file}")
+    print(f"\nSaved: {out_file}")
 
 
 if __name__ == "__main__":
