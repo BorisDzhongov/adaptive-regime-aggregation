@@ -1,5 +1,5 @@
 import numpy as np
-from code.ara_core import ARA
+from ara.ara_core import ARA
 
 # Example matrices
 G = np.array([
