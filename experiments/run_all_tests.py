@@ -13,7 +13,7 @@ experiments = [
     "experiments/mc_prob_test_ARA_colab.py",
     "experiments/mc_test_a_colab.py",
     "experiments/mc_test_b_colab.py",
-    "experiments/make_tables.py"
+    "experiments/make_tables.py",
 ]
 
 for exp in experiments:
@@ -27,6 +27,7 @@ for exp in experiments:
 
     print(result.stdout)
 
-    if result.stderr:
+    if result.returncode != 0:
         print("Errors:")
         print(result.stderr)
+        raise SystemExit(result.returncode)
