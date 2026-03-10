@@ -1,0 +1,5 @@
+method,accuracy_vs_oracle,mean_regret,p95_regret
+"Φ adapted (risk φ², budget/meas φ⁻¹)",0.885283,0.006168,0.050069
+WSM mean,0.844967,0.011398,0.089049
+Φ regime (risk α=φ²),0.841583,0.011842,0.092421
+Φ current α=φ,0.837122,0.012535,0.097067

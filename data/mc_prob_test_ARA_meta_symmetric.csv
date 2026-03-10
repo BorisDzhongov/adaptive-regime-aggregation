@@ -1,0 +1,2 @@
+N,seed,regime,beta_a,beta_b,sigma_d,sigma_i,bias_d,bias_i,corr,extremize_gamma,ell,w_ell,w_d,alpha,hetero_strength_d,hetero_strength_i,tail_df,tail_scale_d,tail_scale_i
+200000,2,symmetric,2.0,2.0,0.7,0.7,0.0,0.0,0.25,1.5,0.5,1.0,1.0,1.618033988749895,,,,,

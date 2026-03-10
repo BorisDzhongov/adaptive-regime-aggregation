@@ -1,0 +1,4 @@
+method,truth_winner,P(win A),P(win B),P(win C),P(win D),flip_rate vs truth,flip_rate (shock-only)
+Φ regime (risk α=φ²),D,0.000411,0.305772,5e-05,0.693767,0.306233,0.240108
+Φ current α=φ,D,0.000611,0.331928,0.000117,0.667344,0.332656,0.261312
+WSM mean,D,0.000794,0.359394,0.0001,0.639711,0.360289,0.290925
