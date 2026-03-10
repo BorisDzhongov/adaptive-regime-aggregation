@@ -1,11 +1,10 @@
 import csv
-import math
 from pathlib import Path
 
-TRUE_STATE = 0.5
-X_D = 0.95
-X_I = 0.05
-ANCHOR = 0.5
+TRUE_STATE = 0.50
+X_D = 0.99
+X_I = 0.20
+ANCHOR = 0.50
 PHI = 1.61803398875
 
 REGIMES = {
@@ -48,21 +47,21 @@ def abs_error(x, truth):
 
 
 def interpretation(x):
-    if abs(x - 0.5) < 1e-12:
-        return "exact neutral balance"
-    if x > 0.5:
+    if abs(x - ANCHOR) < 1e-12:
+        return "exact anchor balance"
+    if x > ANCHOR:
         return "leans toward data subsystem"
     return "leans toward intuition subsystem"
 
 
 def print_method_block(method_name, output_value):
-    err = abs_error(output_value, TRUE_STATE)
-    anch = abs_error(output_value, ANCHOR)
+    err_true = abs_error(output_value, TRUE_STATE)
+    err_anchor = abs_error(output_value, ANCHOR)
 
     print(f"\nMethod: {method_name}")
     print(f"Output = {output_value:.6f}")
-    print(f"|output - true_state| = {err:.6f}")
-    print(f"|output - anchor|     = {anch:.6f}")
+    print(f"|output - true_state| = {err_true:.6f}")
+    print(f"|output - anchor|     = {err_anchor:.6f}")
     print(f"Interpretation: {interpretation(output_value)}")
 
 
@@ -73,12 +72,17 @@ def main():
 
     rows = []
 
-    print("\nTotal Signal Divergence Comparison Test")
-    print("=" * 50)
+    print("\nARA Boundary Comparison Test: Extreme Asymmetric Conflict")
+    print("=" * 62)
     print(f"True state: {TRUE_STATE:.2f}")
     print(f"Data subsystem (x_d): {X_D:.2f}")
     print(f"Intuition subsystem (x_i): {X_I:.2f}")
     print(f"Anchor: {ANCHOR:.2f}")
+    print("\nScenario summary:")
+    print("- strong data-side extremity")
+    print("- lower but non-symmetric intuition signal")
+    print("- neutral truth/anchor used as reference")
+    print("- intended to differentiate aggregation behavior under boundary stress")
 
     # Baseline methods
     mean_val = arithmetic_mean(X_D, X_I)
@@ -86,16 +90,18 @@ def main():
     log_val = log_pool(X_D, X_I, w_d=0.5)
 
     print("\nBaseline methods")
-    print("-" * 50)
+    print("-" * 62)
     print_method_block("Arithmetic mean", mean_val)
     print_method_block("Linear opinion pool (equal weights)", lop_val)
     print_method_block("Logarithmic pool (equal weights)", log_val)
 
-    for method_name, output_value, alpha in [
-        ("Arithmetic mean", mean_val, None),
-        ("Linear opinion pool (equal weights)", lop_val, None),
-        ("Logarithmic pool (equal weights)", log_val, None),
-    ]:
+    baseline_methods = [
+        ("Arithmetic mean", mean_val),
+        ("Linear opinion pool (equal weights)", lop_val),
+        ("Logarithmic pool (equal weights)", log_val),
+    ]
+
+    for method_name, output_value in baseline_methods:
         rows.append({
             "method": method_name,
             "regime": "baseline",
@@ -112,16 +118,22 @@ def main():
 
     # ARA across regimes
     print("\nARA across regimes")
-    print("-" * 50)
+    print("-" * 62)
+
+    ara_results = []
 
     for regime_name, alpha in REGIMES.items():
         x_b = ara_balance(X_D, X_I, alpha)
+        err_true = abs_error(x_b, TRUE_STATE)
+        err_anchor = abs_error(x_b, ANCHOR)
 
         print(f"\nRegime: {regime_name} (alpha={alpha:.6f})")
         print(f"Output = {x_b:.6f}")
-        print(f"|output - true_state| = {abs_error(x_b, TRUE_STATE):.6f}")
-        print(f"|output - anchor|     = {abs_error(x_b, ANCHOR):.6f}")
+        print(f"|output - true_state| = {err_true:.6f}")
+        print(f"|output - anchor|     = {err_anchor:.6f}")
         print(f"Interpretation: {interpretation(x_b)}")
+
+        ara_results.append((regime_name, alpha, x_b, err_true, err_anchor))
 
         rows.append({
             "method": "ARA",
@@ -132,10 +144,20 @@ def main():
             "true_state": TRUE_STATE,
             "anchor": ANCHOR,
             "output": round(x_b, 6),
-            "abs_error_true_state": round(abs_error(x_b, TRUE_STATE), 6),
-            "abs_error_anchor": round(abs_error(x_b, ANCHOR), 6),
+            "abs_error_true_state": round(err_true, 6),
+            "abs_error_anchor": round(err_anchor, 6),
             "interpretation": interpretation(x_b),
         })
+
+    best_regime = min(ara_results, key=lambda t: t[3])
+
+    print("\nARA summary")
+    print("-" * 62)
+    print(
+        f"Closest ARA regime to true state: {best_regime[0]} "
+        f"(alpha={best_regime[1]:.6f}, output={best_regime[2]:.6f}, "
+        f"abs_error={best_regime[3]:.6f})"
+    )
 
     with open(out_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
