@@ -1,4 +1,9 @@
+import sys
+from pathlib import Path
 import numpy as np
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 from ara.ara_core import ARA
 
 # Example matrices
