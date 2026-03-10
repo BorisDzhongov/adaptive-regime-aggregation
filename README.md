@@ -1,6 +1,7 @@
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18945818.svg)](https://doi.org/10.5281/zenodo.18945818)
-
 # Adaptive Regime Aggregation (ARA)
+
+[![Paper DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18810210.svg)](https://doi.org/10.5281/zenodo.18810210)
+[![Software DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18945818.svg)](https://doi.org/10.5281/zenodo.18945818)
 
 Reference implementation of Adaptive Regime Aggregation (ARA), a formal framework for aggregating heterogeneous criteria and coordinating multiple informational subsystems under limited information.
 
