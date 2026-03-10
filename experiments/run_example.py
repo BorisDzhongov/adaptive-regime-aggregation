@@ -1,7 +1,6 @@
 import numpy as np
 from code.ara_core import ARA
 
-# Example matrices
 G = np.array([
     [8.5, 7.0, 9.0, 6.5],
     [7.5, 8.5, 6.5, 6.2],
