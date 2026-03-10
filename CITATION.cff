@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+title: Adaptive Regime Aggregation (ARA)
+message: "If you use this software, please cite the ARA paper."
+type: software
+
+authors:
+  - family-names: Dzhongov
+    given-names: Boris
+
+doi: 10.5281/zenodo.18810210
+repository-code: https://github.com/BorisDzhongov/adaptive-regime-aggregation
+
+abstract: >
+  Reference implementation of Adaptive Regime Aggregation (ARA),
+  a design-first architecture for structured balancing under
+  limited or conflicting information.
+
+license: MIT
+
+keywords:
+  - decision theory
+  - multi-criteria decision analysis
+  - aggregation
+  - computational decision methods
