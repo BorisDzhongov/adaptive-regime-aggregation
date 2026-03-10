@@ -1,0 +1,30 @@
+name: Run Extended ARA Tests
+
+on:
+  push:
+    paths:
+      - "extended_tests/**"
+  workflow_dispatch:
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Run regime sensitivity test
+      run: |
+        python extended_tests/sensitivity/regime_sensitivity.py
+
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: ara-extended-results
+        path: extended_tests/results
