@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "extended_tests/**"
+      - ".github/workflows/extended_tests.yml"
   workflow_dispatch:
 
 jobs:
@@ -22,6 +23,10 @@ jobs:
     - name: Run regime sensitivity test
       run: |
         python extended_tests/sensitivity/regime_sensitivity.py
+
+    - name: Run total signal divergence test
+      run: |
+        python extended_tests/stress_tests/total_signal_divergence.py
 
     - name: Upload results
       uses: actions/upload-artifact@v4
