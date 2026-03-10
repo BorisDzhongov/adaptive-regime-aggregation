@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "extended_tests/**"
+      - ".github/workflows/extended_tests.yml"
   workflow_dispatch:
 
 jobs:
@@ -11,21 +12,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.10"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
-    - name: Run all extended tests
-      run: |
-        for f in extended_tests/**/*.py; do
-          echo "Running $f"
-          python "$f"
-        done
+      - name: Run all extended tests
+        run: |
+          echo "Discovering test files..."
+          find extended_tests -type f -name "*.py" | sort > test_list.txt
+          cat test_list.txt
 
-    - name: Upload results
-      uses: actions/upload-artifact@v4
-      with:
-        name: ara-extended-results
-        path: extended_tests/results
+          echo ""
+          echo "Running tests..."
+          echo "=============================="
+
+          while IFS= read -r f; do
+            echo ""
+            echo "=============================="
+            echo "RUNNING: $f"
+            echo "=============================="
+            python "$f"
+            echo "FINISHED: $f"
+          done < test_list.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ara-extended-results
+          path: extended_tests/results
