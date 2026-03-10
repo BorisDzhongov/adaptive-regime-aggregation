@@ -4,7 +4,6 @@ on:
   push:
     paths:
       - "extended_tests/**"
-      - ".github/workflows/extended_tests.yml"
   workflow_dispatch:
 
 jobs:
@@ -12,21 +11,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - uses: actions/setup-python@v5
       with:
         python-version: "3.10"
 
-    - name: Run regime sensitivity test
+    - name: Run all extended tests
       run: |
-        python extended_tests/sensitivity/regime_sensitivity.py
-
-    - name: Run total signal divergence test
-      run: |
-        python extended_tests/stress_tests/total_signal_divergence.py
+        for f in extended_tests/**/*.py; do
+          echo "Running $f"
+          python "$f"
+        done
 
     - name: Upload results
       uses: actions/upload-artifact@v4
