@@ -118,8 +118,7 @@ def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
     rng = np.where((maxv - minv) == 0.0, 1.0, (maxv - minv))
     xn = (x - minv) / rng
 
-    mc = x.shape[2]
-    outrank = np.zeros((N_PROJECTS, N_PROJECTS, mc), dtype=float)
+    outrank = np.zeros((N_PROJECTS, N_PROJECTS, x.shape[2]), dtype=float)
 
     for a in range(N_PROJECTS):
         for b in range(N_PROJECTS):
@@ -127,7 +126,6 @@ def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
                 continue
 
             diff = xn[:, a, :] - xn[:, b, :]
-
             concordance = np.mean(diff >= 0.0, axis=0)
             discordance = np.max(np.maximum(-diff, 0.0), axis=0)
 
@@ -187,30 +185,25 @@ def select_adaptive_alpha(g_obs, i_obs, sig_g, sig_i):
     alpha = np.ones_like(g_obs, dtype=float)
 
     # Base regime from relative reliability
-    strong_i = ratio_3d >= 1.75
-    mild_i = (ratio_3d >= 1.20) & (ratio_3d < 1.75)
-    mild_g = (ratio_3d > 0.57) & (ratio_3d < 0.83)
-    strong_g = ratio_3d <= 0.57
-
-    alpha[strong_i] = PHI2
-    alpha[mild_i] = PHI
-    alpha[mild_g] = PHI_INV
-    alpha[strong_g] = PHI_INV2
+    alpha = np.where(ratio_3d >= 1.75, PHI2, alpha)
+    alpha = np.where((ratio_3d >= 1.20) & (ratio_3d < 1.75), PHI, alpha)
+    alpha = np.where((ratio_3d > 0.57) & (ratio_3d < 0.83), PHI_INV, alpha)
+    alpha = np.where(ratio_3d <= 0.57, PHI_INV2, alpha)
 
     # Disagreement amplification
     moderate = (abs_delta >= 0.75) & (abs_delta < 1.50)
     strong = abs_delta >= 1.50
 
     # move one step outward for moderate disagreement
-    alpha[(alpha == 1.0) & moderate & (delta > 0)] = PHI
-    alpha[(alpha == 1.0) & moderate & (delta < 0)] = PHI_INV
+    alpha = np.where((alpha == 1.0) & moderate & (delta > 0), PHI, alpha)
+    alpha = np.where((alpha == 1.0) & moderate & (delta < 0), PHI_INV, alpha)
 
-    alpha[(alpha == PHI) & moderate] = PHI2
-    alpha[(alpha == PHI_INV) & moderate] = PHI_INV2
+    alpha = np.where((alpha == PHI) & moderate, PHI2, alpha)
+    alpha = np.where((alpha == PHI_INV) & moderate, PHI_INV2, alpha)
 
     # strong disagreement pushes directly to the extreme in the observed direction
-    alpha[strong & (delta > 0)] = PHI2
-    alpha[strong & (delta < 0)] = PHI_INV2
+    alpha = np.where(strong & (delta > 0), PHI2, alpha)
+    alpha = np.where(strong & (delta < 0), PHI_INV2, alpha)
 
     return alpha
 
