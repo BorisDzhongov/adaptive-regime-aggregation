@@ -4,12 +4,17 @@ import numpy as np
 
 # ============================================================
 # Adaptive Regime Aggregation (ARA) — Reliability Stress Test
-# Two scenarios:
-#   1) reliable_conflict
-#   2) complementary_reliability
-# Output:
-#   - testE_reliable_conflict.csv
-#   - testE_complementary_reliability.csv
+#
+# Scenarios:
+#   1) balanced_reliable
+#   2) reliable_vs_noisy
+#   3) reliable_vs_biased
+#   4) complementary_local_reliability
+#
+# Goal:
+#   Show that ARA is not "always best", but has a structural
+#   advantage when reliable information exists under noise,
+#   asymmetry, or heterogeneous local reliability.
 # ============================================================
 
 PHI = (1 + 5 ** 0.5) / 2
@@ -64,7 +69,6 @@ def wsm_scores(X):
 
 
 def topsis_scores(X):
-    # all criteria assumed beneficial
     denom = np.sqrt((X ** 2).sum(axis=1, keepdims=True))
     denom[denom == 0] = 1.0
     Z = X / denom
@@ -116,9 +120,7 @@ def electre_i_scores(X, concordance_threshold=0.60, discordance_threshold=0.30):
 # ARA adaptive reliability logic
 # ------------------------------------------------------------
 def choose_alpha(r_g, r_i):
-    # Choose regime ONLY from relative reliability, not from disagreement magnitude.
-    # If both subsystems are similarly reliable, ARA should remain near balance
-    # even when their values differ substantially.
+    # Regime chosen only from relative reliability.
     share_i = r_i / (r_g + r_i + 1e-12)
 
     if share_i >= 0.80:
@@ -153,18 +155,16 @@ def ara_adaptive_scores(G, I, Rg, Ri, anchor=ANCHOR, anchor_weight=0.25):
 # ------------------------------------------------------------
 # Scenario generators
 # ------------------------------------------------------------
-def scenario_reliable_conflict(rng):
-    # Both subsystems reliable, low noise, but strong disagreement in value levels.
+def scenario_balanced_reliable(rng):
+    """
+    Control scenario:
+    Both subsystems are reliable, low-noise, and centered around truth.
+    ARA should not force artificial dominance here.
+    """
     truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
 
-    gap = rng.uniform(1.8, 3.0, size=(N_CRITERIA, 1))
-    sign = rng.choice([-1.0, 1.0], size=(N_CRITERIA, 1))
-
-    eps_g = rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
-    eps_i = rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
-
-    G_obs = truth + sign * (gap / 2.0) + eps_g
-    I_obs = truth - sign * (gap / 2.0) + eps_i
+    G_obs = truth + rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
+    I_obs = truth + rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
 
     Rg = np.full((N_CRITERIA, N_PROJECTS), 0.92)
     Ri = np.full((N_CRITERIA, N_PROJECTS), 0.92)
@@ -172,9 +172,63 @@ def scenario_reliable_conflict(rng):
     return truth, np.clip(G_obs, 0, 10), np.clip(I_obs, 0, 10), Rg, Ri
 
 
-def scenario_complementary_reliability(rng):
-    # For each variable, at least one subsystem is reliable.
-    # The other subsystem is noisier.
+def scenario_reliable_vs_noisy(rng):
+    """
+    One subsystem is globally reliable; the other is much noisier.
+    This tests whether ARA preserves the reliable signal better than pooling.
+    """
+    truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
+
+    i_reliable = bool(rng.integers(0, 2))
+
+    if i_reliable:
+        Rg = np.full((N_CRITERIA, N_PROJECTS), 0.35)
+        Ri = np.full((N_CRITERIA, N_PROJECTS), 0.92)
+
+        G_obs = truth + rng.normal(0.0, 1.40, size=(N_CRITERIA, N_PROJECTS))
+        I_obs = truth + rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
+    else:
+        Rg = np.full((N_CRITERIA, N_PROJECTS), 0.92)
+        Ri = np.full((N_CRITERIA, N_PROJECTS), 0.35)
+
+        G_obs = truth + rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
+        I_obs = truth + rng.normal(0.0, 1.40, size=(N_CRITERIA, N_PROJECTS))
+
+    return truth, np.clip(G_obs, 0, 10), np.clip(I_obs, 0, 10), Rg, Ri
+
+
+def scenario_reliable_vs_biased(rng):
+    """
+    One subsystem is reliable; the other is systematically biased upward or downward.
+    This is stronger than pure noise because the distortion is directional.
+    """
+    truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
+
+    i_reliable = bool(rng.integers(0, 2))
+    bias_sign = rng.choice([-1.0, 1.0])
+    bias_strength = rng.uniform(1.2, 2.0)
+
+    if i_reliable:
+        Rg = np.full((N_CRITERIA, N_PROJECTS), 0.35)
+        Ri = np.full((N_CRITERIA, N_PROJECTS), 0.92)
+
+        G_obs = truth + bias_sign * bias_strength + rng.normal(0.0, 0.45, size=(N_CRITERIA, N_PROJECTS))
+        I_obs = truth + rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
+    else:
+        Rg = np.full((N_CRITERIA, N_PROJECTS), 0.92)
+        Ri = np.full((N_CRITERIA, N_PROJECTS), 0.35)
+
+        G_obs = truth + rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
+        I_obs = truth + bias_sign * bias_strength + rng.normal(0.0, 0.45, size=(N_CRITERIA, N_PROJECTS))
+
+    return truth, np.clip(G_obs, 0, 10), np.clip(I_obs, 0, 10), Rg, Ri
+
+
+def scenario_complementary_local_reliability(rng):
+    """
+    For each cell, at least one subsystem is reliable, but reliability varies locally.
+    This is the main adaptive scenario: ARA should exploit local structure.
+    """
     truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
 
     G_obs = np.zeros((N_CRITERIA, N_PROJECTS), dtype=float)
@@ -190,12 +244,23 @@ def scenario_complementary_reliability(rng):
                 Rg[k, p] = 0.92
                 Ri[k, p] = 0.35
                 G_obs[k, p] = truth[k, p] + rng.normal(0.0, 0.20)
-                I_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
+
+                # noisy OR biased local distortion
+                if bool(rng.integers(0, 2)):
+                    I_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
+                else:
+                    local_bias = rng.choice([-1.0, 1.0]) * rng.uniform(1.0, 1.8)
+                    I_obs[k, p] = truth[k, p] + local_bias + rng.normal(0.0, 0.40)
             else:
                 Rg[k, p] = 0.35
                 Ri[k, p] = 0.92
-                G_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
                 I_obs[k, p] = truth[k, p] + rng.normal(0.0, 0.20)
+
+                if bool(rng.integers(0, 2)):
+                    G_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
+                else:
+                    local_bias = rng.choice([-1.0, 1.0]) * rng.uniform(1.0, 1.8)
+                    G_obs[k, p] = truth[k, p] + local_bias + rng.normal(0.0, 0.40)
 
     return truth, np.clip(G_obs, 0, 10), np.clip(I_obs, 0, 10), Rg, Ri
 
@@ -204,8 +269,8 @@ def scenario_complementary_reliability(rng):
 # Benchmark input for classical MCDA
 # IMPORTANT:
 # Classical MCDA methods should NOT receive local reliability-aware
-# variable-by-variable coordination, because that would import part
-# of ARA's adaptive architecture into the baseline.
+# variable-by-variable coordination, because that would import
+# part of ARA's adaptive architecture into the baseline.
 # ------------------------------------------------------------
 def pooled_matrix_for_mcda(G, I):
     return 0.5 * (G + I)
@@ -320,5 +385,7 @@ def run_scenario(name, generator, n_reps=N_REPS):
 # Main
 # ------------------------------------------------------------
 if __name__ == "__main__":
-    run_scenario("testE_reliable_conflict", scenario_reliable_conflict)
-    run_scenario("testE_complementary_reliability", scenario_complementary_reliability)
+    run_scenario("testE_balanced_reliable", scenario_balanced_reliable)
+    run_scenario("testE_reliable_vs_noisy", scenario_reliable_vs_noisy)
+    run_scenario("testE_reliable_vs_biased", scenario_reliable_vs_biased)
+    run_scenario("testE_complementary_local_reliability", scenario_complementary_local_reliability)
