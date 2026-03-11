@@ -178,46 +178,99 @@ def oracle_scores(g_true, i_true, sig_g, sig_i):
     return score_mean(x)
 
 
-def select_adaptive_alpha(g_obs, i_obs, sig_g, sig_i):
+def sigma_to_prior_reliability(sig):
     """
-    Reliability-aware local adaptive alpha.
+    Smaller sigma -> higher prior reliability in [0,1].
     """
-    delta = i_obs - g_obs
-    abs_delta = np.abs(delta)
+    rel = 1.0 / (1.0 + sig ** 2)
+    return np.clip(rel, 0.0, 1.0)
 
-    ratio = sig_g / sig_i
-    ratio_3d = ratio[:, None, None]
 
-    alpha = np.ones_like(g_obs, dtype=float)
+def expand_prior_reliability(rel_1d, shape):
+    return np.repeat(rel_1d[:, None, None], shape[1], axis=1).repeat(shape[2], axis=2)
 
-    # Base regime from relative reliability
-    alpha = np.where(ratio_3d >= 1.75, PHI2, alpha)
-    alpha = np.where((ratio_3d >= 1.20) & (ratio_3d < 1.75), PHI, alpha)
-    alpha = np.where((ratio_3d > 0.57) & (ratio_3d < 0.83), PHI_INV, alpha)
-    alpha = np.where(ratio_3d <= 0.57, PHI_INV2, alpha)
 
-    # Disagreement amplification
-    moderate = (abs_delta >= 0.80) & (abs_delta < 1.60)
-    strong = abs_delta >= 1.60
+def boundary_stress_indicator(raw):
+    raw_filled = np.where(np.isnan(raw), L, raw)
 
-    alpha = np.where((alpha == 1.0) & moderate & (delta > 0), PHI, alpha)
-    alpha = np.where((alpha == 1.0) & moderate & (delta < 0), PHI_INV, alpha)
+    outside = ((raw_filled < 0.0) | (raw_filled > 10.0)).astype(float)
+    dist_to_boundary = np.minimum(np.abs(raw_filled), np.abs(10.0 - raw_filled))
+    near_boundary = np.clip((1.0 - dist_to_boundary) / 1.0, 0.0, 1.0)
 
-    alpha = np.where((alpha == PHI) & moderate, PHI2, alpha)
-    alpha = np.where((alpha == PHI_INV) & moderate, PHI_INV2, alpha)
+    penalty = np.maximum(outside, near_boundary)
+    penalty = np.where(np.isnan(raw), 1.0, penalty)
+    return penalty
 
-    alpha = np.where(strong & (delta > 0), PHI2, alpha)
-    alpha = np.where(strong & (delta < 0), PHI_INV2, alpha)
+
+def group_instability_indicator(x_benefit):
+    x = safe_fill_nan_with_criterion_mean(x_benefit)
+    penalty = np.zeros_like(x, dtype=float)
+
+    for _, idxs in GROUPS.items():
+        idxs = np.array(idxs, dtype=int)
+        group_mean = np.mean(x[idxs, :, :], axis=0, keepdims=True)
+        dev = np.abs(x[idxs, :, :] - group_mean)
+        penalty[idxs, :, :] = np.clip(dev / 3.0, 0.0, 1.0)
+
+    return penalty
+
+
+def interpret_reliability(raw_obs, benefit_obs, sig):
+    """
+    Reliability is architecturally interpreted from:
+    - prior sigma-based reliability
+    - missingness
+    - boundary/clipping stress
+    - group instability
+    """
+    prior_1d = sigma_to_prior_reliability(sig)
+    prior = expand_prior_reliability(prior_1d, raw_obs.shape)
+
+    missing_pen = np.isnan(raw_obs).astype(float)
+    boundary_pen = boundary_stress_indicator(raw_obs)
+    group_pen = group_instability_indicator(benefit_obs)
+
+    rel = (
+        0.65 * prior
+        + 0.15 * (1.0 - missing_pen)
+        + 0.10 * (1.0 - boundary_pen)
+        + 0.10 * (1.0 - group_pen)
+    )
+
+    return np.clip(rel, 0.0, 1.0)
+
+
+def select_adaptive_alpha_from_reliability(rel_g, rel_i):
+    """
+    Choose alpha only from interpreted reliability gap.
+    """
+    rel_gap = rel_i - rel_g
+    abs_gap = np.abs(rel_gap)
+
+    alpha = np.ones_like(rel_gap, dtype=float)
+
+    mild = (abs_gap >= 0.05) & (abs_gap < 0.15)
+    strong = abs_gap >= 0.15
+
+    alpha[mild & (rel_gap > 0)] = PHI
+    alpha[mild & (rel_gap < 0)] = PHI_INV
+
+    alpha[strong & (rel_gap > 0)] = PHI2
+    alpha[strong & (rel_gap < 0)] = PHI_INV2
 
     return alpha
 
 
 def ara_adaptive_operator(g_obs, i_obs, sig_g, sig_i, ell=L):
-    g_obs = safe_fill_nan_with_anchor(g_obs, anchor=L)
-    i_obs = safe_fill_nan_with_anchor(i_obs, anchor=L)
-    alpha = select_adaptive_alpha(g_obs, i_obs, sig_g, sig_i)
-    x = (ell + g_obs + alpha * i_obs) / (2.0 + alpha)
-    return x, alpha
+    g_filled = safe_fill_nan_with_anchor(g_obs, anchor=L)
+    i_filled = safe_fill_nan_with_anchor(i_obs, anchor=L)
+
+    rel_g = interpret_reliability(g_obs, g_filled, sig_g)
+    rel_i = interpret_reliability(i_obs, i_filled, sig_i)
+
+    alpha = select_adaptive_alpha_from_reliability(rel_g, rel_i)
+    x = (ell + g_filled + alpha * i_filled) / (2.0 + alpha)
+    return x, alpha, rel_g, rel_i
 
 
 def alpha_shares(alpha):
@@ -271,15 +324,11 @@ def inject_regime_conflict_shift(g, i, strength=0.90):
 
 
 def inject_nonrandom_missingness(rng, x, base_rate=0.10, tail_boost=0.12):
-    """
-    Missingness is higher for extreme values and slightly criterion-dependent.
-    """
     prob = np.full(x.shape, base_rate, dtype=float)
 
     extreme = (x <= 2.0) | (x >= 8.0)
     prob = prob + tail_boost * extreme
 
-    # slightly higher missingness on later criteria
     criterion_boost = np.linspace(0.00, 0.05, M)[:, None, None]
     prob = prob + criterion_boost
 
@@ -331,10 +380,10 @@ def evaluate(g_obs_raw, i_obs_raw, g_true, i_true, sig_g, sig_i):
 
     rows = []
 
-    x_ara, alpha = ara_adaptive_operator(g_obs, i_obs, sig_g, sig_i)
+    x_ara, alpha, rel_g, rel_i = ara_adaptive_operator(g_obs, i_obs, sig_g, sig_i)
     rows.append(
         evaluate_single_method(
-            method_name="ARA_adaptive",
+            method_name="ARA_adaptive_reliability",
             scores=score_mean(x_ara),
             oracle=oracle,
             oracle_w=oracle_w,
@@ -449,7 +498,7 @@ def print_summary(rows):
 
         for r in scenario_rows:
             print(
-                f"{r['method']:20s} | "
+                f"{r['method']:28s} | "
                 f"acc={r['accuracy_vs_oracle']:.4f} | "
                 f"mean_regret={r['mean_regret']:.6f} | "
                 f"p95={r['p95_regret']:.6f} | "
@@ -457,7 +506,7 @@ def print_summary(rows):
                 f"entropy={r['winner_entropy']:.6f}"
             )
 
-            if r["method"] == "ARA_adaptive":
+            if r["method"] == "ARA_adaptive_reliability":
                 print(
                     "   alpha shares: "
                     f"phi^-2={float(r['share_phi_inv2']):.4f}, "
@@ -484,11 +533,9 @@ def run_test(
 ):
     rng = np.random.default_rng(seed)
 
-    # latent clean truth
     g_true_raw = np.repeat(G[:, :, None], n_mc, axis=2)
     i_true_raw = np.repeat(I[:, :, None], n_mc, axis=2)
 
-    # add reliability-driven latent noise
     g_true_raw = clip010(
         g_true_raw + rng.normal(0.0, SIG_G[:, None, None], size=g_true_raw.shape)
     )
@@ -496,13 +543,11 @@ def run_test(
         i_true_raw + rng.normal(0.0, SIG_I[:, None, None], size=i_true_raw.shape)
     )
 
-    # benefit-space clean oracle inputs
     g_true = to_benefit_space(g_true_raw)
     i_true = to_benefit_space(i_true_raw)
 
     scenarios = {}
 
-    # 1) Missingness-dominant
     g_obs = g_true_raw + add_group_correlated_noise(rng, sigma_corr, g_true_raw.shape)
     i_obs = i_true_raw + add_group_correlated_noise(rng, sigma_corr, i_true_raw.shape)
     g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.75)
@@ -510,7 +555,6 @@ def run_test(
     i_obs, miss_i = inject_nonrandom_missingness(rng, i_obs, base_rate=missing_base_i, tail_boost=0.14)
     scenarios["missingness_dominant"] = (g_obs, i_obs, miss_g, miss_i, None, None)
 
-    # 2) Outlier-dominant
     g_obs = g_true_raw + add_heavytail_noise(rng, sigma_tail_g, g_true_raw.shape, df=t_df)
     i_obs = i_true_raw + add_heavytail_noise(rng, sigma_tail_i, i_true_raw.shape, df=t_df)
     g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.85)
@@ -518,7 +562,6 @@ def run_test(
     i_obs = inject_outliers(rng, i_obs, p_outlier=outlier_rate_i, magnitude=outlier_scale_i, df=t_df)
     scenarios["outlier_dominant"] = (g_obs, i_obs, None, None, outlier_rate_g, outlier_rate_i)
 
-    # 3) Full robustness stress
     g_obs = (
         g_true_raw
         + add_group_correlated_noise(rng, sigma_corr, g_true_raw.shape)
