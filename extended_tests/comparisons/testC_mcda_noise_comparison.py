@@ -1,116 +1,259 @@
 import numpy as np
 import csv
+import os
 
 PHI = (1 + 5 ** 0.5) / 2
 L = 5.0
 PROJECTS = ["A", "B", "C", "D"]
 
 G = np.array([
-    [8.5,7.0,9.0,6.5],
-    [7.5,8.5,6.5,6.2],
-    [6.0,8.1,5.5,8.0],
-    [6.5,7.0,5.0,8.5],
-    [6.0,7.5,8.5,5.8],
-    [7.0,6.0,8.0,6.5],
-    [6.5,7.5,6.0,8.0],
-    [5.5,6.5,4.5,7.5],
-    [5.5,6.5,4.0,7.0],
-    [6.0,6.5,5.0,7.5],
-    [7.0,6.5,8.5,6.0]
-])
+    [8.5, 7.0, 9.0, 6.5],
+    [7.5, 8.5, 6.5, 6.2],
+    [6.0, 8.1, 5.5, 8.0],
+    [6.5, 7.0, 5.0, 8.5],
+    [6.0, 7.5, 8.5, 5.8],
+    [7.0, 6.0, 8.0, 6.5],
+    [6.5, 7.5, 6.0, 8.0],
+    [5.5, 6.5, 4.5, 7.5],
+    [5.5, 6.5, 4.0, 7.0],
+    [6.0, 6.5, 5.0, 7.5],
+    [7.0, 6.5, 8.5, 6.0],
+], dtype=float)
 
 I = np.array([
-    [8.0,6.5,9.5,6.0],
-    [7.0,9.0,6.0,7.0],
-    [5.0,6.5,4.5,7.5],
-    [6.0,7.5,4.0,8.0],
-    [5.5,7.0,8.0,6.0],
-    [6.5,5.0,7.0,6.0],
-    [6.0,7.0,5.5,7.5],
-    [4.0,5.5,3.0,7.0],
-    [4.5,6.0,3.0,6.5],
-    [5.0,6.0,4.0,7.0],
-    [6.5,6.0,9.0,5.5]
-])
+    [8.0, 6.5, 9.5, 6.0],
+    [7.0, 9.0, 6.0, 7.0],
+    [5.0, 6.5, 4.5, 7.5],
+    [6.0, 7.5, 4.0, 8.0],
+    [5.5, 7.0, 8.0, 6.0],
+    [6.5, 5.0, 7.0, 6.0],
+    [6.0, 7.0, 5.5, 7.5],
+    [4.0, 5.5, 3.0, 7.0],
+    [4.5, 6.0, 3.0, 6.5],
+    [5.0, 6.0, 4.0, 7.0],
+    [6.5, 6.0, 9.0, 5.5],
+], dtype=float)
 
-M, N = G.shape
-
-
-def clip(x):
-    return np.clip(x,0,10)
+M, N_PROJECTS = G.shape
 
 
-def ara(g,i,alpha):
-    return (L + g + alpha*i)/(2+alpha)
+def clip010(x):
+    return np.clip(x, 0.0, 10.0)
 
 
-def mean_score(x):
+def aggregate_mean(g, i):
+    return 0.5 * (g + i)
+
+
+def ara_operator(g, i, alpha, ell=L):
+    return (ell + g + alpha * i) / (2.0 + alpha)
+
+
+def score_mean(x):
     return x.mean(axis=0)
 
 
-def topsis_score(x):
+def score_topsis(x):
+    # x shape: (criteria, projects, mc)
+    denom = np.sqrt(np.sum(x ** 2, axis=1, keepdims=True))
+    denom = np.where(denom == 0.0, 1.0, denom)
 
-    denom = np.sqrt((x**2).sum(axis=1,keepdims=True))
-    r = x/denom
+    r = x / denom
+    v = r / M  # equal weights
 
-    ideal_best = r.max(axis=1,keepdims=True)
-    ideal_worst = r.min(axis=1,keepdims=True)
+    ideal_best = np.max(v, axis=1, keepdims=True)
+    ideal_worst = np.min(v, axis=1, keepdims=True)
 
-    d_pos = np.sqrt(((r-ideal_best)**2).sum(axis=0))
-    d_neg = np.sqrt(((r-ideal_worst)**2).sum(axis=0))
+    d_pos = np.sqrt(np.sum((v - ideal_best) ** 2, axis=0))
+    d_neg = np.sqrt(np.sum((v - ideal_worst) ** 2, axis=0))
 
-    return d_neg/(d_pos+d_neg+1e-9)
+    return d_neg / (d_pos + d_neg + 1e-12)
+
+
+def score_promethee_ii(x):
+    # simple PROMETHEE II-style net flow with usual preference
+    # x shape: (criteria, projects, mc)
+    minv = np.min(x, axis=1, keepdims=True)
+    maxv = np.max(x, axis=1, keepdims=True)
+    rng = np.where((maxv - minv) == 0.0, 1.0, (maxv - minv))
+    xn = (x - minv) / rng
+
+    flows = np.zeros((N_PROJECTS, x.shape[2]), dtype=float)
+
+    for a in range(N_PROJECTS):
+        phi_plus = np.zeros(x.shape[2], dtype=float)
+        phi_minus = np.zeros(x.shape[2], dtype=float)
+
+        for b in range(N_PROJECTS):
+            if a == b:
+                continue
+
+            diff_ab = xn[:, a, :] - xn[:, b, :]
+            pref_ab = np.mean(np.maximum(diff_ab, 0.0), axis=0)
+
+            diff_ba = xn[:, b, :] - xn[:, a, :]
+            pref_ba = np.mean(np.maximum(diff_ba, 0.0), axis=0)
+
+            phi_plus += pref_ab
+            phi_minus += pref_ba
+
+        flows[a, :] = (phi_plus - phi_minus) / (N_PROJECTS - 1)
+
+    return flows
 
 
 def winners(scores):
-    return np.argmax(scores,axis=0)
+    return np.argmax(scores, axis=0)
 
 
-def run():
+def oracle_scores(g_true, i_true):
+    x = 0.5 * (g_true + i_true)
+    return score_mean(x)
 
-    n_mc = 50000
-    rng = np.random.default_rng(42)
 
-    g_true = np.repeat(G[:,:,None],n_mc,axis=2)
-    i_true = np.repeat(I[:,:,None],n_mc,axis=2)
+def noise_symmetric(rng, sigma, shape):
+    return rng.normal(0.0, sigma, size=shape)
 
-    eps = rng.normal(0,0.8,g_true.shape)
 
-    g_obs = clip(g_true + eps)
-    i_obs = clip(i_true + eps)
+def noise_asymmetric(rng, sigma, shape):
+    z = rng.normal(0.0, sigma, size=shape)
+    skew = rng.exponential(scale=sigma * 0.35, size=shape) - sigma * 0.35
+    return z + skew
 
+
+def noise_heavytail(rng, sigma, shape, df=3):
+    return rng.standard_t(df=df, size=shape) * sigma
+
+
+def winner_entropy(freq):
+    return -np.sum(freq * np.log(freq + 1e-12))
+
+
+def evaluate_methods(g_obs, i_obs, g_true, i_true):
     methods = {
-        "WSM":0.5*(g_obs+i_obs),
-        "ARA_phi":ara(g_obs,i_obs,PHI),
-        "ARA_phi2":ara(g_obs,i_obs,PHI**2)
+        "WSM": aggregate_mean(g_obs, i_obs),
+        "ARA_one": ara_operator(g_obs, i_obs, 1.0),
+        "ARA_phi": ara_operator(g_obs, i_obs, PHI),
+        "ARA_phi2": ara_operator(g_obs, i_obs, PHI ** 2),
     }
 
-    rows=[]
+    oracle = oracle_scores(g_true, i_true)
+    oracle_w = winners(oracle)
+    oracle_best = oracle[oracle_w, np.arange(oracle.shape[1])]
 
-    for name,x in methods.items():
+    rows = []
 
-        s_mean = mean_score(x)
-        s_topsis = topsis_score(x)
+    for name, x in methods.items():
+        method_scores = {
+            "mean": score_mean(x),
+            "TOPSIS": score_topsis(x),
+            "PROMETHEE_II": score_promethee_ii(x),
+        }
 
-        for rule,s in [("mean",s_mean),("topsis",s_topsis)]:
+        for rule_name, scores in method_scores.items():
+            w = winners(scores)
+            chosen = oracle[w, np.arange(oracle.shape[1])]
+            regret = oracle_best - chosen
+            freq = np.bincount(w, minlength=N_PROJECTS) / oracle.shape[1]
 
-            w = winners(s)
+            rows.append({
+                "method": f"{name}+{rule_name}",
+                "accuracy_vs_oracle": float(np.mean(w == oracle_w)),
+                "mean_regret": float(np.mean(regret)),
+                "p95_regret": float(np.quantile(regret, 0.95)),
+                "winner_entropy": float(winner_entropy(freq)),
+                "P_win_A": float(freq[0]),
+                "P_win_B": float(freq[1]),
+                "P_win_C": float(freq[2]),
+                "P_win_D": float(freq[3]),
+            })
 
-            freq = np.bincount(w,minlength=N)/len(w)
+    x_plain = aggregate_mean(g_obs, i_obs)
+    direct_scores = {
+        "WSM_direct": score_mean(x_plain),
+        "TOPSIS_direct": score_topsis(x_plain),
+        "PROMETHEE_II_direct": score_promethee_ii(x_plain),
+    }
 
-            rows.append([
-                name+"_"+rule,
-                freq[0],freq[1],freq[2],freq[3]
-            ])
+    for rule_name, scores in direct_scores.items():
+        w = winners(scores)
+        chosen = oracle[w, np.arange(oracle.shape[1])]
+        regret = oracle_best - chosen
+        freq = np.bincount(w, minlength=N_PROJECTS) / oracle.shape[1]
 
-    with open("testC_mcda_noise_results.csv","w",newline="") as f:
+        rows.append({
+            "method": rule_name,
+            "accuracy_vs_oracle": float(np.mean(w == oracle_w)),
+            "mean_regret": float(np.mean(regret)),
+            "p95_regret": float(np.quantile(regret, 0.95)),
+            "winner_entropy": float(winner_entropy(freq)),
+            "P_win_A": float(freq[0]),
+            "P_win_B": float(freq[1]),
+            "P_win_C": float(freq[2]),
+            "P_win_D": float(freq[3]),
+        })
 
-        writer=csv.writer(f)
+    return rows
 
-        writer.writerow(["method","P_A","P_B","P_C","P_D"])
 
+def save_csv(rows, output_path):
+    if not rows:
+        return
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    fieldnames = [
+        "scenario",
+        "method",
+        "accuracy_vs_oracle",
+        "mean_regret",
+        "p95_regret",
+        "winner_entropy",
+        "P_win_A",
+        "P_win_B",
+        "P_win_C",
+        "P_win_D",
+    ]
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
         writer.writerows(rows)
 
+    print(f"Saved: {output_path}")
 
-if __name__=="__main__":
-    run()
+
+def run_test(n_mc=100000, sigma=0.8, seed=42):
+    rng = np.random.default_rng(seed)
+
+    g_true = np.repeat(G[:, :, None], n_mc, axis=2)
+    i_true = np.repeat(I[:, :, None], n_mc, axis=2)
+
+    scenarios = {}
+
+    eps_g = noise_symmetric(rng, sigma, g_true.shape)
+    eps_i = noise_symmetric(rng, sigma, i_true.shape)
+    scenarios["symmetric"] = (clip010(g_true + eps_g), clip010(i_true + eps_i))
+
+    eps_g = noise_asymmetric(rng, sigma, g_true.shape)
+    eps_i = noise_asymmetric(rng, sigma, i_true.shape)
+    scenarios["asymmetric"] = (clip010(g_true + eps_g), clip010(i_true + eps_i))
+
+    eps_g = noise_heavytail(rng, sigma, g_true.shape)
+    eps_i = noise_heavytail(rng, sigma, i_true.shape)
+    scenarios["heavytail"] = (clip010(g_true + eps_g), clip010(i_true + eps_i))
+
+    all_rows = []
+
+    for scenario_name, (g_obs, i_obs) in scenarios.items():
+        rows = evaluate_methods(g_obs, i_obs, g_true, i_true)
+        for row in rows:
+            row["scenario"] = scenario_name
+        all_rows.extend(rows)
+
+    output_path = "extended_tests/results/csv/testC_mcda_noise_comparison_results.csv"
+    save_csv(all_rows, output_path)
+
+
+if __name__ == "__main__":
+    run_test()
