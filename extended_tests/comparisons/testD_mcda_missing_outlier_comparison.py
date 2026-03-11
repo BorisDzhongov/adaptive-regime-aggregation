@@ -54,6 +54,14 @@ GROUPS = {
     "strategic": [9, 10],
 }
 
+ALPHA_REGIMES = {
+    "ARA_fixed_phi_inv2": PHI_INV2,
+    "ARA_fixed_phi_inv": PHI_INV,
+    "ARA_fixed_one": 1.0,
+    "ARA_fixed_phi": PHI,
+    "ARA_fixed_phi2": PHI2,
+}
+
 
 def clip010(x):
     return np.clip(x, 0.0, 10.0)
@@ -179,9 +187,6 @@ def oracle_scores(g_true, i_true, sig_g, sig_i):
 
 
 def sigma_to_prior_reliability(sig):
-    """
-    Smaller sigma -> higher prior reliability in [0,1].
-    """
     rel = 1.0 / (1.0 + sig ** 2)
     return np.clip(rel, 0.0, 1.0)
 
@@ -194,7 +199,9 @@ def boundary_stress_indicator(raw):
     raw_filled = np.where(np.isnan(raw), L, raw)
 
     outside = ((raw_filled < 0.0) | (raw_filled > 10.0)).astype(float)
-    dist_to_boundary = np.minimum(np.abs(raw_filled), np.abs(10.0 - raw_filled))
+
+    clipped = clip010(raw_filled)
+    dist_to_boundary = np.minimum(np.abs(clipped - 0.0), np.abs(10.0 - clipped))
     near_boundary = np.clip((1.0 - dist_to_boundary) / 1.0, 0.0, 1.0)
 
     penalty = np.maximum(outside, near_boundary)
@@ -217,11 +224,11 @@ def group_instability_indicator(x_benefit):
 
 def interpret_reliability(raw_obs, benefit_obs, sig):
     """
-    Reliability is architecturally interpreted from:
+    Reliability is interpreted from:
     - prior sigma-based reliability
     - missingness
-    - boundary/clipping stress
-    - group instability
+    - boundary/clipping stress from TRUE raw observations
+    - group instability in benefit space
     """
     prior_1d = sigma_to_prior_reliability(sig)
     prior = expand_prior_reliability(prior_1d, raw_obs.shape)
@@ -241,9 +248,6 @@ def interpret_reliability(raw_obs, benefit_obs, sig):
 
 
 def select_adaptive_alpha_from_reliability(rel_g, rel_i):
-    """
-    Choose alpha only from interpreted reliability gap.
-    """
     rel_gap = rel_i - rel_g
     abs_gap = np.abs(rel_gap)
 
@@ -261,15 +265,29 @@ def select_adaptive_alpha_from_reliability(rel_g, rel_i):
     return alpha
 
 
-def ara_adaptive_operator(g_obs, i_obs, sig_g, sig_i, ell=L):
-    g_filled = safe_fill_nan_with_anchor(g_obs, anchor=L)
-    i_filled = safe_fill_nan_with_anchor(i_obs, anchor=L)
+def ara_fixed_operator(g_obs, i_obs, alpha, ell=L):
+    g_filled = safe_fill_nan_with_anchor(g_obs, anchor=ell)
+    i_filled = safe_fill_nan_with_anchor(i_obs, anchor=ell)
+    return (ell + g_filled + alpha * i_filled) / (2.0 + alpha)
 
-    rel_g = interpret_reliability(g_obs, g_filled, sig_g)
-    rel_i = interpret_reliability(i_obs, i_filled, sig_i)
+
+def ara_adaptive_operator(g_obs_raw, i_obs_raw, sig_g, sig_i, ell=L):
+    # Raw observations for reliability interpretation
+    g_obs_clip = clip010(g_obs_raw)
+    i_obs_clip = clip010(i_obs_raw)
+
+    g_obs_benefit = to_benefit_space(g_obs_clip)
+    i_obs_benefit = to_benefit_space(i_obs_clip)
+
+    g_filled = safe_fill_nan_with_anchor(g_obs_benefit, anchor=ell)
+    i_filled = safe_fill_nan_with_anchor(i_obs_benefit, anchor=ell)
+
+    rel_g = interpret_reliability(g_obs_raw, g_obs_benefit, sig_g)
+    rel_i = interpret_reliability(i_obs_raw, i_obs_benefit, sig_i)
 
     alpha = select_adaptive_alpha_from_reliability(rel_g, rel_i)
     x = (ell + g_filled + alpha * i_filled) / (2.0 + alpha)
+
     return x, alpha, rel_g, rel_i
 
 
@@ -281,6 +299,16 @@ def alpha_shares(alpha):
         "share_one": float(np.sum(np.isclose(alpha, 1.0)) / total),
         "share_phi": float(np.sum(np.isclose(alpha, PHI)) / total),
         "share_phi2": float(np.sum(np.isclose(alpha, PHI2)) / total),
+    }
+
+
+def fixed_alpha_shares(alpha_value):
+    return {
+        "share_phi_inv2": float(np.isclose(alpha_value, PHI_INV2)),
+        "share_phi_inv": float(np.isclose(alpha_value, PHI_INV)),
+        "share_one": float(np.isclose(alpha_value, 1.0)),
+        "share_phi": float(np.isclose(alpha_value, PHI)),
+        "share_phi2": float(np.isclose(alpha_value, PHI2)),
     }
 
 
@@ -371,6 +399,7 @@ def evaluate_single_method(method_name, scores, oracle, oracle_w, oracle_best, e
 
 
 def evaluate(g_obs_raw, i_obs_raw, g_true, i_true, sig_g, sig_i):
+    # For classical methods
     g_obs = to_benefit_space(clip010(g_obs_raw))
     i_obs = to_benefit_space(clip010(i_obs_raw))
 
@@ -380,7 +409,8 @@ def evaluate(g_obs_raw, i_obs_raw, g_true, i_true, sig_g, sig_i):
 
     rows = []
 
-    x_ara, alpha, rel_g, rel_i = ara_adaptive_operator(g_obs, i_obs, sig_g, sig_i)
+    # Adaptive ARA
+    x_ara, alpha, rel_g, rel_i = ara_adaptive_operator(g_obs_raw, i_obs_raw, sig_g, sig_i)
     rows.append(
         evaluate_single_method(
             method_name="ARA_adaptive_reliability",
@@ -392,6 +422,24 @@ def evaluate(g_obs_raw, i_obs_raw, g_true, i_true, sig_g, sig_i):
         )
     )
 
+    # Fixed ARA baselines
+    g_filled = safe_fill_nan_with_anchor(g_obs, anchor=L)
+    i_filled = safe_fill_nan_with_anchor(i_obs, anchor=L)
+
+    for method_name, alpha_value in ALPHA_REGIMES.items():
+        x_fixed = (L + g_filled + alpha_value * i_filled) / (2.0 + alpha_value)
+        rows.append(
+            evaluate_single_method(
+                method_name=method_name,
+                scores=score_mean(x_fixed),
+                oracle=oracle,
+                oracle_w=oracle_w,
+                oracle_best=oracle_best,
+                extra=fixed_alpha_shares(alpha_value),
+            )
+        )
+
+    # Classical MCDA baselines
     x_plain = aggregate_mean(
         safe_fill_nan_with_anchor(g_obs, anchor=L),
         safe_fill_nan_with_anchor(i_obs, anchor=L),
@@ -506,7 +554,7 @@ def print_summary(rows):
                 f"entropy={r['winner_entropy']:.6f}"
             )
 
-            if r["method"] == "ARA_adaptive_reliability":
+            if r["method"].startswith("ARA_"):
                 print(
                     "   alpha shares: "
                     f"phi^-2={float(r['share_phi_inv2']):.4f}, "
@@ -548,6 +596,7 @@ def run_test(
 
     scenarios = {}
 
+    # 1) missingness dominant
     g_obs = g_true_raw + add_group_correlated_noise(rng, sigma_corr, g_true_raw.shape)
     i_obs = i_true_raw + add_group_correlated_noise(rng, sigma_corr, i_true_raw.shape)
     g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.75)
@@ -555,6 +604,7 @@ def run_test(
     i_obs, miss_i = inject_nonrandom_missingness(rng, i_obs, base_rate=missing_base_i, tail_boost=0.14)
     scenarios["missingness_dominant"] = (g_obs, i_obs, miss_g, miss_i, None, None)
 
+    # 2) outlier dominant
     g_obs = g_true_raw + add_heavytail_noise(rng, sigma_tail_g, g_true_raw.shape, df=t_df)
     i_obs = i_true_raw + add_heavytail_noise(rng, sigma_tail_i, i_true_raw.shape, df=t_df)
     g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.85)
@@ -562,6 +612,7 @@ def run_test(
     i_obs = inject_outliers(rng, i_obs, p_outlier=outlier_rate_i, magnitude=outlier_scale_i, df=t_df)
     scenarios["outlier_dominant"] = (g_obs, i_obs, None, None, outlier_rate_g, outlier_rate_i)
 
+    # 3) full robustness stress
     g_obs = (
         g_true_raw
         + add_group_correlated_noise(rng, sigma_corr, g_true_raw.shape)
@@ -578,7 +629,6 @@ def run_test(
     i_obs = inject_outliers(rng, i_obs, p_outlier=outlier_rate_i, magnitude=outlier_scale_i, df=t_df)
     g_obs, miss_g = inject_nonrandom_missingness(rng, g_obs, base_rate=missing_base_g, tail_boost=0.12)
     i_obs, miss_i = inject_nonrandom_missingness(rng, i_obs, base_rate=missing_base_i, tail_boost=0.16)
-
     scenarios["full_robustness_stress"] = (g_obs, i_obs, miss_g, miss_i, outlier_rate_g, outlier_rate_i)
 
     all_rows = []
