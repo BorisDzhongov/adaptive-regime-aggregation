@@ -1,0 +1,325 @@
+import csv
+from pathlib import Path
+import numpy as np
+
+# ============================================================
+# Adaptive Regime Aggregation (ARA) — Reliability Stress Test
+# Two scenarios:
+#   1) reliable_conflict
+#   2) complementary_reliability
+# Output:
+#   - testE_reliable_conflict.csv
+#   - testE_complementary_reliability.csv
+# ============================================================
+
+PHI = (1 + 5 ** 0.5) / 2
+REGIMES = {
+    "phi_inv2": 1.0 / (PHI ** 2),
+    "phi_inv": 1.0 / PHI,
+    "one": 1.0,
+    "phi": PHI,
+    "phi2": PHI ** 2,
+}
+
+PROJECTS = ["A", "B", "C", "D"]
+N_PROJECTS = len(PROJECTS)
+N_CRITERIA = 11
+ANCHOR = 5.0
+N_REPS = 3000
+RNG = np.random.default_rng(42)
+
+OUTDIR = Path("results")
+OUTDIR.mkdir(parents=True, exist_ok=True)
+
+
+# ------------------------------------------------------------
+# Utility metrics
+# ------------------------------------------------------------
+def normalized_entropy(win_counts):
+    probs = np.array(win_counts, dtype=float)
+    probs /= probs.sum()
+    probs = probs[probs > 0]
+    if len(probs) == 0:
+        return 0.0
+    h = -np.sum(probs * np.log(probs))
+    return float(h / np.log(N_PROJECTS))
+
+
+def regret_from_scores(scores, oracle_scores):
+    chosen = int(np.argmax(scores))
+    best_oracle = float(np.max(oracle_scores))
+    chosen_oracle = float(oracle_scores[chosen])
+    return best_oracle - chosen_oracle
+
+
+# ------------------------------------------------------------
+# Classical MCDA methods
+# All methods operate on a single pooled matrix X (criteria x projects)
+# ------------------------------------------------------------
+def wsm_scores(X):
+    return X.mean(axis=0)
+
+
+def topsis_scores(X):
+    # all criteria assumed beneficial
+    denom = np.sqrt((X ** 2).sum(axis=1, keepdims=True))
+    denom[denom == 0] = 1.0
+    Z = X / denom
+    ideal = Z.max(axis=1)
+    anti = Z.min(axis=1)
+    d_pos = np.sqrt(((Z - ideal[:, None]) ** 2).sum(axis=0))
+    d_neg = np.sqrt(((Z - anti[:, None]) ** 2).sum(axis=0))
+    return d_neg / (d_pos + d_neg + 1e-12)
+
+
+def promethee_ii_scores(X):
+    # simple linear preference on pairwise differences
+    m = X.shape[1]
+    pref = np.zeros((m, m), dtype=float)
+
+    for a in range(m):
+        for b in range(m):
+            if a == b:
+                continue
+            diff = X[:, a] - X[:, b]
+            p = np.maximum(diff, 0.0).mean()
+            pref[a, b] = p
+
+    leaving = pref.mean(axis=1)
+    entering = pref.mean(axis=0)
+    return leaving - entering
+
+
+def electre_i_scores(X, concordance_threshold=0.60, discordance_threshold=0.30):
+    m = X.shape[1]
+    ranges = X.max(axis=1) - X.min(axis=1)
+    ranges[ranges == 0] = 1.0
+
+    outrank = np.zeros((m, m), dtype=float)
+
+    for a in range(m):
+        for b in range(m):
+            if a == b:
+                continue
+
+            concordant = (X[:, a] >= X[:, b]).mean()
+            discordant = np.max(np.maximum(X[:, b] - X[:, a], 0.0) / ranges)
+
+            if concordant >= concordance_threshold and discordant <= discordance_threshold:
+                outrank[a, b] = 1.0
+
+    return outrank.sum(axis=1) - outrank.sum(axis=0)
+
+
+# ------------------------------------------------------------
+# ARA adaptive reliability logic
+# ------------------------------------------------------------
+def choose_alpha(r_g, r_i):
+    # Choose regime ONLY from relative reliability, not from disagreement magnitude.
+    # This is intentional:
+    # If both subsystems are equally reliable (even if they disagree strongly),
+    # ARA should remain near balance rather than jump to extremes.
+    share_i = r_i / (r_g + r_i + 1e-12)
+
+    if share_i >= 0.80:
+        return "phi2", REGIMES["phi2"]
+    if share_i >= 0.60:
+        return "phi", REGIMES["phi"]
+    if share_i >= 0.40:
+        return "one", REGIMES["one"]
+    if share_i >= 0.20:
+        return "phi_inv", REGIMES["phi_inv"]
+    return "phi_inv2", REGIMES["phi_inv2"]
+
+
+def ara_adaptive_scores(G, I, Rg, Ri, anchor=ANCHOR, anchor_weight=0.25):
+    # G, I, Rg, Ri shape: (criteria, projects)
+    K, P = G.shape
+    X = np.zeros((K, P), dtype=float)
+
+    regime_counts = {k: 0 for k in REGIMES.keys()}
+
+    for k in range(K):
+        for p in range(P):
+            regime_name, alpha = choose_alpha(Rg[k, p], Ri[k, p])
+            regime_counts[regime_name] += 1
+
+            num = Rg[k, p] * G[k, p] + alpha * Ri[k, p] * I[k, p] + anchor_weight * anchor
+            den = Rg[k, p] + alpha * Ri[k, p] + anchor_weight
+            X[k, p] = num / den
+
+    scores = X.mean(axis=0)
+    return scores, regime_counts
+
+
+# ------------------------------------------------------------
+# Scenario generators
+# Each returns:
+#   truth      : true latent criterion-project matrix
+#   G_obs      : subsystem G observations
+#   I_obs      : subsystem I observations
+#   Rg, Ri     : reliability matrices in [0,1]
+# ------------------------------------------------------------
+def scenario_reliable_conflict(rng):
+    # Both subsystems reliable, low noise, but strong disagreement in value levels.
+    truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
+
+    # large structured disagreement
+    gap = rng.uniform(1.8, 3.0, size=(N_CRITERIA, 1))
+    sign = rng.choice([-1.0, 1.0], size=(N_CRITERIA, 1))
+
+    eps_g = rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
+    eps_i = rng.normal(0.0, 0.20, size=(N_CRITERIA, N_PROJECTS))
+
+    G_obs = truth + sign * (gap / 2.0) + eps_g
+    I_obs = truth - sign * (gap / 2.0) + eps_i
+
+    Rg = np.full((N_CRITERIA, N_PROJECTS), 0.92)
+    Ri = np.full((N_CRITERIA, N_PROJECTS), 0.92)
+
+    return truth, np.clip(G_obs, 0, 10), np.clip(I_obs, 0, 10), Rg, Ri
+
+
+def scenario_complementary_reliability(rng):
+    # For each variable, at least one subsystem is reliable.
+    # The other subsystem is noisier.
+    truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
+
+    G_obs = np.zeros((N_CRITERIA, N_PROJECTS), dtype=float)
+    I_obs = np.zeros((N_CRITERIA, N_PROJECTS), dtype=float)
+    Rg = np.zeros((N_CRITERIA, N_PROJECTS), dtype=float)
+    Ri = np.zeros((N_CRITERIA, N_PROJECTS), dtype=float)
+
+    for k in range(N_CRITERIA):
+        for p in range(N_PROJECTS):
+            g_reliable = bool(rng.integers(0, 2))  # random which subsystem is reliable
+
+            if g_reliable:
+                Rg[k, p] = 0.92
+                Ri[k, p] = 0.35
+
+                G_obs[k, p] = truth[k, p] + rng.normal(0.0, 0.20)
+                I_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
+            else:
+                Rg[k, p] = 0.35
+                Ri[k, p] = 0.92
+
+                G_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
+                I_obs[k, p] = truth[k, p] + rng.normal(0.0, 0.20)
+
+    return truth, np.clip(G_obs, 0, 10), np.clip(I_obs, 0, 10), Rg, Ri
+
+
+# ------------------------------------------------------------
+# Benchmark runner
+# ------------------------------------------------------------
+def pooled_matrix(G, I, Rg, Ri):
+    # Reliability-aware collapse for classical MCDA methods
+    return (Rg * G + Ri * I) / (Rg + Ri + 1e-12)
+
+
+def run_scenario(name, generator, n_reps=N_REPS):
+    methods = [
+        "ARA_adaptive",
+        "WSM",
+        "TOPSIS",
+        "PROMETHEE_II",
+        "ELECTRE_I",
+    ]
+
+    win_counts = {m: np.zeros(N_PROJECTS, dtype=int) for m in methods}
+    correct_counts = {m: 0 for m in methods}
+    regrets = {m: [] for m in methods}
+
+    ara_regime_total = {k: 0 for k in REGIMES.keys()}
+    total_cells = 0
+
+    for _ in range(n_reps):
+        truth, G, I, Rg, Ri = generator(RNG)
+
+        oracle_scores = truth.mean(axis=0)
+        oracle_winner = int(np.argmax(oracle_scores))
+
+        # ARA adaptive
+        ara_scores, regime_counts = ara_adaptive_scores(G, I, Rg, Ri)
+        ara_winner = int(np.argmax(ara_scores))
+        win_counts["ARA_adaptive"][ara_winner] += 1
+        correct_counts["ARA_adaptive"] += int(ara_winner == oracle_winner)
+        regrets["ARA_adaptive"].append(regret_from_scores(ara_scores, oracle_scores))
+
+        for k, v in regime_counts.items():
+            ara_regime_total[k] += v
+        total_cells += N_CRITERIA * N_PROJECTS
+
+        # Classical methods on pooled matrix
+        X = pooled_matrix(G, I, Rg, Ri)
+
+        method_scores = {
+            "WSM": wsm_scores(X),
+            "TOPSIS": topsis_scores(X),
+            "PROMETHEE_II": promethee_ii_scores(X),
+            "ELECTRE_I": electre_i_scores(X),
+        }
+
+        for m, s in method_scores.items():
+            winner = int(np.argmax(s))
+            win_counts[m][winner] += 1
+            correct_counts[m] += int(winner == oracle_winner)
+            regrets[m].append(regret_from_scores(s, oracle_scores))
+
+    out_file = OUTDIR / f"{name}.csv"
+    with out_file.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "scenario",
+            "method",
+            "accuracy_vs_oracle",
+            "mean_regret",
+            "p95_regret",
+            "winner_entropy",
+            "P(win_A)",
+            "P(win_B)",
+            "P(win_C)",
+            "P(win_D)",
+            "share_phi_inv2",
+            "share_phi_inv",
+            "share_one",
+            "share_phi",
+            "share_phi2",
+        ])
+
+        for m in methods:
+            probs = win_counts[m] / float(n_reps)
+
+            if m == "ARA_adaptive":
+                shares = {k: ara_regime_total[k] / float(total_cells) for k in REGIMES.keys()}
+            else:
+                shares = {k: "" for k in REGIMES.keys()}
+
+            writer.writerow([
+                name,
+                m,
+                round(correct_counts[m] / float(n_reps), 6),
+                round(float(np.mean(regrets[m])), 6),
+                round(float(np.percentile(regrets[m], 95)), 6),
+                round(normalized_entropy(win_counts[m]), 6),
+                round(float(probs[0]), 6),
+                round(float(probs[1]), 6),
+                round(float(probs[2]), 6),
+                round(float(probs[3]), 6),
+                shares["phi_inv2"],
+                shares["phi_inv"],
+                shares["one"],
+                shares["phi"],
+                shares["phi2"],
+            ])
+
+    print(f"Saved: {out_file}")
+
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    run_scenario("testE_reliable_conflict", scenario_reliable_conflict)
+    run_scenario("testE_complementary_reliability", scenario_complementary_reliability)
