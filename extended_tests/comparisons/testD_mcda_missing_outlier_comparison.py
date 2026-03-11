@@ -1,227 +1,108 @@
 import numpy as np
-import pandas as pd
+import csv
 
-PHI = (1 + 5 ** 0.5) / 2
-L = 5.0
-PROJECTS = ["A", "B", "C", "D"]
+PHI=(1+5**0.5)/2
+L=5
 
-G = np.array([
-    [8.5, 7.0, 9.0, 6.5],
-    [7.5, 8.5, 6.5, 6.2],
-    [6.0, 8.1, 5.5, 8.0],
-    [6.5, 7.0, 5.0, 8.5],
-    [6.0, 7.5, 8.5, 5.8],
-    [7.0, 6.0, 8.0, 6.5],
-    [6.5, 7.5, 6.0, 8.0],
-    [5.5, 6.5, 4.5, 7.5],
-    [5.5, 6.5, 4.0, 7.0],
-    [6.0, 6.5, 5.0, 7.5],
-    [7.0, 6.5, 8.5, 6.0],
-], dtype=float)
+PROJECTS=["A","B","C","D"]
 
-I = np.array([
-    [8.0, 6.5, 9.5, 6.0],
-    [7.0, 9.0, 6.0, 7.0],
-    [5.0, 6.5, 4.5, 7.5],
-    [6.0, 7.5, 4.0, 8.0],
-    [5.5, 7.0, 8.0, 6.0],
-    [6.5, 5.0, 7.0, 6.0],
-    [6.0, 7.0, 5.5, 7.5],
-    [4.0, 5.5, 3.0, 7.0],
-    [4.5, 6.0, 3.0, 6.5],
-    [5.0, 6.0, 4.0, 7.0],
-    [6.5, 6.0, 9.0, 5.5],
-], dtype=float)
+G=np.array([
+[8.5,7.0,9.0,6.5],
+[7.5,8.5,6.5,6.2],
+[6.0,8.1,5.5,8.0],
+[6.5,7.0,5.0,8.5],
+[6.0,7.5,8.5,5.8],
+[7.0,6.0,8.0,6.5],
+[6.5,7.5,6.0,8.0],
+[5.5,6.5,4.5,7.5],
+[5.5,6.5,4.0,7.0],
+[6.0,6.5,5.0,7.5],
+[7.0,6.5,8.5,6.0]
+])
 
-M, N_PROJECTS = G.shape
+I=np.array([
+[8.0,6.5,9.5,6.0],
+[7.0,9.0,6.0,7.0],
+[5.0,6.5,4.5,7.5],
+[6.0,7.5,4.0,8.0],
+[5.5,7.0,8.0,6.0],
+[6.5,5.0,7.0,6.0],
+[6.0,7.0,5.5,7.5],
+[4.0,5.5,3.0,7.0],
+[4.5,6.0,3.0,6.5],
+[5.0,6.0,4.0,7.0],
+[6.5,6.0,9.0,5.5]
+])
 
-
-def clip010(x):
-    return np.clip(x, 0.0, 10.0)
+M,N=G.shape
 
 
-def fill_anchor(x, mask, anchor=L):
-    y = x.copy()
-    y[mask] = anchor
-    return y
+def clip(x):
+    return np.clip(x,0,10)
 
 
-def aggregate_mean(g, i):
-    return 0.5 * (g + i)
+def ara(g,i,alpha):
+    return (L+g+alpha*i)/(2+alpha)
 
 
-def ara_operator(g, i, alpha, ell=L):
-    return (ell + g + alpha * i) / (2.0 + alpha)
-
-
-def score_mean(x):
+def mean_score(x):
     return x.mean(axis=0)
 
 
-def score_topsis(x):
-    denom = np.sqrt(np.sum(x**2, axis=1, keepdims=True))
-    denom = np.where(denom == 0.0, 1.0, denom)
-    r = x / denom
-    v = r / M
-    ideal_best = np.max(v, axis=1, keepdims=True)
-    ideal_worst = np.min(v, axis=1, keepdims=True)
-    d_pos = np.sqrt(np.sum((v - ideal_best) ** 2, axis=0))
-    d_neg = np.sqrt(np.sum((v - ideal_worst) ** 2, axis=0))
-    return d_neg / (d_pos + d_neg + 1e-12)
-
-
-def score_promethee_ii(x):
-    minv = np.min(x, axis=1, keepdims=True)
-    maxv = np.max(x, axis=1, keepdims=True)
-    rng = np.where((maxv - minv) == 0.0, 1.0, (maxv - minv))
-    xn = (x - minv) / rng
-
-    flows = np.zeros((N_PROJECTS, x.shape[2]), dtype=float)
-
-    for a in range(N_PROJECTS):
-        phi_plus = np.zeros(x.shape[2], dtype=float)
-        phi_minus = np.zeros(x.shape[2], dtype=float)
-
-        for b in range(N_PROJECTS):
-            if a == b:
-                continue
-            diff_ab = xn[:, a, :] - xn[:, b, :]
-            pref_ab = np.mean(np.maximum(diff_ab, 0.0), axis=0)
-
-            diff_ba = xn[:, b, :] - xn[:, a, :]
-            pref_ba = np.mean(np.maximum(diff_ba, 0.0), axis=0)
-
-            phi_plus += pref_ab
-            phi_minus += pref_ba
-
-        flows[a, :] = (phi_plus - phi_minus) / (N_PROJECTS - 1)
-
-    return flows
-
-
 def winners(scores):
-    return np.argmax(scores, axis=0)
+    return np.argmax(scores,axis=0)
 
 
-def oracle_scores(g_true, i_true, sig_g, sig_i):
-    wg = 1.0 / (sig_g[:, None, None] ** 2)
-    wi = 1.0 / (sig_i[:, None, None] ** 2)
-    x = (wg * g_true + wi * i_true) / (wg + wi)
-    return score_mean(x)
+def run():
 
+    n_mc=50000
+    rng=np.random.default_rng(123)
 
-def evaluate(g_obs, i_obs, g_true, i_true, sig_g, sig_i):
-    methods = {
-        "WSM": aggregate_mean(g_obs, i_obs),
-        "ARA_one": ara_operator(g_obs, i_obs, 1.0),
-        "ARA_phi": ara_operator(g_obs, i_obs, PHI),
-        "ARA_phi2": ara_operator(g_obs, i_obs, PHI**2),
+    g_true=np.repeat(G[:,:,None],n_mc,axis=2)
+    i_true=np.repeat(I[:,:,None],n_mc,axis=2)
+
+    g_obs=g_true.copy()
+    i_obs=i_true.copy()
+
+    outliers=rng.random(g_obs.shape)<0.05
+
+    g_obs=clip(g_obs + outliers*rng.normal(0,2,g_obs.shape))
+    i_obs=clip(i_obs + outliers*rng.normal(0,2,i_obs.shape))
+
+    missing=rng.random(g_obs.shape)<0.1
+
+    g_obs[missing]=L
+    i_obs[missing]=L
+
+    methods={
+        "WSM":0.5*(g_obs+i_obs),
+        "ARA_phi":ara(g_obs,i_obs,PHI),
+        "ARA_phi2":ara(g_obs,i_obs,PHI**2)
     }
 
-    oracle = oracle_scores(g_true, i_true, sig_g, sig_i)
-    oracle_w = winners(oracle)
-    oracle_best = oracle[oracle_w, np.arange(oracle.shape[1])]
+    rows=[]
 
-    rows = []
+    for name,x in methods.items():
 
-    for name, x in methods.items():
-        for rule_name, scores in {
-            "mean": score_mean(x),
-            "TOPSIS": score_topsis(x),
-            "PROMETHEE_II": score_promethee_ii(x),
-        }.items():
-            w = winners(scores)
-            chosen = oracle[w, np.arange(oracle.shape[1])]
-            regret = oracle_best - chosen
-            freq = np.bincount(w, minlength=N_PROJECTS) / oracle.shape[1]
+        scores=mean_score(x)
 
-            rows.append({
-                "method": f"{name}+{rule_name}",
-                "accuracy_vs_oracle": float(np.mean(w == oracle_w)),
-                "mean_regret": float(np.mean(regret)),
-                "p95_regret": float(np.quantile(regret, 0.95)),
-                "catastrophic_regret_rate": float(np.mean(regret > 0.50)),
-                "winner_entropy": float(-np.sum(freq * np.log(freq + 1e-12))),
-                "P(win A)": float(freq[0]),
-                "P(win B)": float(freq[1]),
-                "P(win C)": float(freq[2]),
-                "P(win D)": float(freq[3]),
-            })
+        w=winners(scores)
 
-    x_plain = aggregate_mean(g_obs, i_obs)
-    for rule_name, scores in {
-        "WSM_direct": score_mean(x_plain),
-        "TOPSIS_direct": score_topsis(x_plain),
-        "PROMETHEE_II_direct": score_promethee_ii(x_plain),
-    }.items():
-        w = winners(scores)
-        chosen = oracle[w, np.arange(oracle.shape[1])]
-        regret = oracle_best - chosen
-        freq = np.bincount(w, minlength=N_PROJECTS) / oracle.shape[1]
+        freq=np.bincount(w,minlength=N)/len(w)
 
-        rows.append({
-            "method": rule_name,
-            "accuracy_vs_oracle": float(np.mean(w == oracle_w)),
-            "mean_regret": float(np.mean(regret)),
-            "p95_regret": float(np.quantile(regret, 0.95)),
-            "catastrophic_regret_rate": float(np.mean(regret > 0.50)),
-            "winner_entropy": float(-np.sum(freq * np.log(freq + 1e-12))),
-            "P(win A)": float(freq[0]),
-            "P(win B)": float(freq[1]),
-            "P(win C)": float(freq[2]),
-            "P(win D)": float(freq[3]),
-        })
+        rows.append([
+            name,
+            freq[0],freq[1],freq[2],freq[3]
+        ])
 
-    return pd.DataFrame(rows)
+    with open("testD_missing_outlier_results.csv","w",newline="") as f:
+
+        writer=csv.writer(f)
+
+        writer.writerow(["method","P_A","P_B","P_C","P_D"])
+
+        writer.writerows(rows)
 
 
-def run_test(
-    n_mc=120_000,
-    seed=123,
-    missing_rate_g=0.08,
-    missing_rate_i=0.14,
-    outlier_rate=0.05,
-    outlier_scale_g=2.0,
-    outlier_scale_i=2.8,
-    t_df=3,
-):
-    rng = np.random.default_rng(seed)
-
-    sig_g = np.full(M, 0.85)
-    sig_i = np.full(M, 0.85)
-
-    sig_g[7:10] = 1.25
-    sig_i[7:10] = 0.50
-
-    sig_g[4:6] = 0.45
-    sig_i[4:6] = 1.15
-
-    g_true = clip010(G[:, :, None] + rng.normal(0, sig_g[:, None, None], size=(M, N_PROJECTS, n_mc)))
-    i_true = clip010(I[:, :, None] + rng.normal(0, sig_i[:, None, None], size=(M, N_PROJECTS, n_mc)))
-
-    g_obs = g_true.copy()
-    i_obs = i_true.copy()
-
-    out_g = rng.random(size=g_obs.shape) < outlier_rate
-    out_i = rng.random(size=i_obs.shape) < outlier_rate
-
-    g_obs = clip010(g_obs + out_g * rng.standard_t(df=t_df, size=g_obs.shape) * outlier_scale_g)
-    i_obs = clip010(i_obs + out_i * rng.standard_t(df=t_df, size=i_obs.shape) * outlier_scale_i)
-
-    miss_g = rng.random(size=g_obs.shape) < missing_rate_g
-    miss_i = rng.random(size=i_obs.shape) < missing_rate_i
-
-    g_obs = fill_anchor(g_obs, miss_g, anchor=L)
-    i_obs = fill_anchor(i_obs, miss_i, anchor=L)
-
-    df = evaluate(g_obs, i_obs, g_true, i_true, sig_g, sig_i)
-    df["missing_rate_g"] = missing_rate_g
-    df["missing_rate_i"] = missing_rate_i
-    df["outlier_rate"] = outlier_rate
-    return df
-
-
-if __name__ == "__main__":
-    df = run_test().round(6)
-    print(df.sort_values(["mean_regret", "accuracy_vs_oracle", "catastrophic_regret_rate"]))
-    df.to_csv("testD_mcda_missing_outlier_comparison_results.csv", index=False)
+if __name__=="__main__":
+    run()
