@@ -40,15 +40,38 @@ I = np.array([
 
 M, N_PROJECTS = G.shape
 
+# 1 = benefit, -1 = cost
+CRITERION_SIGN = np.array([1, 1, -1, 1, -1, 1, 1, -1, -1, 1, 1], dtype=float)
+
+# criterion-level standard deviations (smaller = more reliable)
+SIG_G = np.array([0.75, 0.80, 0.95, 0.82, 0.45, 0.45, 0.88, 1.25, 1.25, 1.25, 0.78], dtype=float)
+SIG_I = np.array([0.82, 0.78, 0.98, 0.85, 1.15, 1.15, 0.90, 0.50, 0.50, 0.50, 0.75], dtype=float)
+
+GROUPS = {
+    "economic": [0, 1, 4],
+    "operational": [2, 3, 5, 6],
+    "risk": [7, 8],
+    "strategic": [9, 10],
+}
+
 
 def clip010(x):
     return np.clip(x, 0.0, 10.0)
 
 
-def fill_anchor(x, mask, anchor=L):
-    y = x.copy()
-    y[mask] = anchor
-    return y
+def to_benefit_space(x):
+    sign = CRITERION_SIGN[:, None, None]
+    return np.where(sign > 0, x, 10.0 - x)
+
+
+def safe_fill_nan_with_anchor(x, anchor=L):
+    return np.where(np.isnan(x), anchor, x)
+
+
+def safe_fill_nan_with_criterion_mean(x):
+    means = np.nanmean(x, axis=1, keepdims=True)
+    means = np.where(np.isnan(means), L, means)
+    return np.where(np.isnan(x), means, x)
 
 
 def aggregate_mean(g, i):
@@ -56,11 +79,13 @@ def aggregate_mean(g, i):
 
 
 def score_mean(x):
+    x = safe_fill_nan_with_criterion_mean(x)
     return x.mean(axis=0)
 
 
 def score_topsis(x):
-    # x shape: (criteria, projects, mc)
+    x = safe_fill_nan_with_criterion_mean(x)
+
     denom = np.sqrt(np.sum(x ** 2, axis=1, keepdims=True))
     denom = np.where(denom == 0.0, 1.0, denom)
 
@@ -77,7 +102,8 @@ def score_topsis(x):
 
 
 def score_promethee_ii(x):
-    # x shape: (criteria, projects, mc)
+    x = safe_fill_nan_with_criterion_mean(x)
+
     minv = np.min(x, axis=1, keepdims=True)
     maxv = np.max(x, axis=1, keepdims=True)
     rng = np.where((maxv - minv) == 0.0, 1.0, (maxv - minv))
@@ -108,11 +134,8 @@ def score_promethee_ii(x):
 
 
 def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
-    """
-    Simplified ELECTRE I-style outranking score.
-    Returns net outranking flow per project per MC run.
-    x shape: (criteria, projects, mc)
-    """
+    x = safe_fill_nan_with_criterion_mean(x)
+
     minv = np.min(x, axis=1, keepdims=True)
     maxv = np.max(x, axis=1, keepdims=True)
     rng = np.where((maxv - minv) == 0.0, 1.0, (maxv - minv))
@@ -157,24 +180,7 @@ def oracle_scores(g_true, i_true, sig_g, sig_i):
 
 def select_adaptive_alpha(g_obs, i_obs, sig_g, sig_i):
     """
-    Local adaptive alpha selection for each cell (criterion, project, mc),
-    combining:
-    1) direction and magnitude of disagreement (i_obs - g_obs)
-    2) criterion-level relative reliability from sig_g and sig_i
-
-    Reliability ratio:
-        r = sig_g / sig_i
-    If r > 1, intuition is more reliable.
-    If r < 1, data is more reliable.
-
-    Base direction from reliability:
-    - strong intuition reliability advantage -> phi^2
-    - mild intuition reliability advantage   -> phi
-    - balanced reliability                   -> 1
-    - mild data reliability advantage        -> 1/phi
-    - strong data reliability advantage      -> 1/phi^2
-
-    Then disagreement magnitude amplifies the base regime one step outward.
+    Reliability-aware local adaptive alpha.
     """
     delta = i_obs - g_obs
     abs_delta = np.abs(delta)
@@ -191,17 +197,15 @@ def select_adaptive_alpha(g_obs, i_obs, sig_g, sig_i):
     alpha = np.where(ratio_3d <= 0.57, PHI_INV2, alpha)
 
     # Disagreement amplification
-    moderate = (abs_delta >= 0.75) & (abs_delta < 1.50)
-    strong = abs_delta >= 1.50
+    moderate = (abs_delta >= 0.80) & (abs_delta < 1.60)
+    strong = abs_delta >= 1.60
 
-    # move one step outward for moderate disagreement
     alpha = np.where((alpha == 1.0) & moderate & (delta > 0), PHI, alpha)
     alpha = np.where((alpha == 1.0) & moderate & (delta < 0), PHI_INV, alpha)
 
     alpha = np.where((alpha == PHI) & moderate, PHI2, alpha)
     alpha = np.where((alpha == PHI_INV) & moderate, PHI_INV2, alpha)
 
-    # strong disagreement pushes directly to the extreme in the observed direction
     alpha = np.where(strong & (delta > 0), PHI2, alpha)
     alpha = np.where(strong & (delta < 0), PHI_INV2, alpha)
 
@@ -209,6 +213,8 @@ def select_adaptive_alpha(g_obs, i_obs, sig_g, sig_i):
 
 
 def ara_adaptive_operator(g_obs, i_obs, sig_g, sig_i, ell=L):
+    g_obs = safe_fill_nan_with_anchor(g_obs, anchor=L)
+    i_obs = safe_fill_nan_with_anchor(i_obs, anchor=L)
     alpha = select_adaptive_alpha(g_obs, i_obs, sig_g, sig_i)
     x = (ell + g_obs + alpha * i_obs) / (2.0 + alpha)
     return x, alpha
@@ -223,6 +229,66 @@ def alpha_shares(alpha):
         "share_phi": float(np.sum(np.isclose(alpha, PHI)) / total),
         "share_phi2": float(np.sum(np.isclose(alpha, PHI2)) / total),
     }
+
+
+def add_group_correlated_noise(rng, sigma, shape):
+    out = np.zeros(shape, dtype=float)
+    _, n_projects, n_mc = shape
+
+    for _, idxs in GROUPS.items():
+        idxs = np.array(idxs, dtype=int)
+        common = rng.normal(0.0, sigma, size=(1, n_projects, n_mc))
+        idio = rng.normal(0.0, sigma * 0.55, size=(len(idxs), n_projects, n_mc))
+        out[idxs, :, :] = 0.70 * common + 0.60 * idio
+
+    return out
+
+
+def add_heavytail_noise(rng, sigma, shape, df=3):
+    return rng.standard_t(df=df, size=shape) * sigma
+
+
+def inject_outliers(rng, x, p_outlier=0.04, magnitude=3.0, df=3):
+    y = x.copy()
+    mask = rng.random(size=x.shape) < p_outlier
+    shocks = rng.standard_t(df=df, size=x.shape) * magnitude
+    y[mask] = y[mask] + shocks[mask]
+    return y
+
+
+def inject_regime_conflict_shift(g, i, strength=0.90):
+    g2 = g.copy()
+    i2 = i.copy()
+
+    for k in range(M):
+        for p in range(N_PROJECTS):
+            sign = 1.0 if ((k + p) % 2 == 0) else -1.0
+            shift = strength * sign
+            g2[k, p, :] += shift
+            i2[k, p, :] -= shift
+
+    return g2, i2
+
+
+def inject_nonrandom_missingness(rng, x, base_rate=0.10, tail_boost=0.12):
+    """
+    Missingness is higher for extreme values and slightly criterion-dependent.
+    """
+    prob = np.full(x.shape, base_rate, dtype=float)
+
+    extreme = (x <= 2.0) | (x >= 8.0)
+    prob = prob + tail_boost * extreme
+
+    # slightly higher missingness on later criteria
+    criterion_boost = np.linspace(0.00, 0.05, M)[:, None, None]
+    prob = prob + criterion_boost
+
+    prob = np.clip(prob, 0.0, 0.85)
+    mask = rng.random(size=x.shape) < prob
+
+    y = x.copy()
+    y[mask] = np.nan
+    return y, mask
 
 
 def evaluate_single_method(method_name, scores, oracle, oracle_w, oracle_best, extra=None):
@@ -255,14 +321,16 @@ def evaluate_single_method(method_name, scores, oracle, oracle_w, oracle_best, e
     return row
 
 
-def evaluate(g_obs, i_obs, g_true, i_true, sig_g, sig_i):
+def evaluate(g_obs_raw, i_obs_raw, g_true, i_true, sig_g, sig_i):
+    g_obs = to_benefit_space(clip010(g_obs_raw))
+    i_obs = to_benefit_space(clip010(i_obs_raw))
+
     oracle = oracle_scores(g_true, i_true, sig_g, sig_i)
     oracle_w = winners(oracle)
     oracle_best = oracle[oracle_w, np.arange(oracle.shape[1])]
 
     rows = []
 
-    # Adaptive ARA only
     x_ara, alpha = ara_adaptive_operator(g_obs, i_obs, sig_g, sig_i)
     rows.append(
         evaluate_single_method(
@@ -275,8 +343,10 @@ def evaluate(g_obs, i_obs, g_true, i_true, sig_g, sig_i):
         )
     )
 
-    # Direct MCDA baselines
-    x_plain = aggregate_mean(g_obs, i_obs)
+    x_plain = aggregate_mean(
+        safe_fill_nan_with_anchor(g_obs, anchor=L),
+        safe_fill_nan_with_anchor(i_obs, anchor=L),
+    )
 
     rows.append(
         evaluate_single_method(
@@ -321,13 +391,14 @@ def evaluate(g_obs, i_obs, g_true, i_true, sig_g, sig_i):
     return rows
 
 
-def save_csv(rows, output_path, missing_rate_g, missing_rate_i, outlier_rate):
+def save_csv(rows, output_path, meta):
     if not rows:
         return
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     fieldnames = [
+        "scenario",
         "method",
         "accuracy_vs_oracle",
         "mean_regret",
@@ -345,13 +416,15 @@ def save_csv(rows, output_path, missing_rate_g, missing_rate_i, outlier_rate):
         "share_phi2",
         "missing_rate_g",
         "missing_rate_i",
-        "outlier_rate",
+        "outlier_rate_g",
+        "outlier_rate_i",
     ]
 
     for row in rows:
-        row["missing_rate_g"] = missing_rate_g
-        row["missing_rate_i"] = missing_rate_i
-        row["outlier_rate"] = outlier_rate
+        row["missing_rate_g"] = meta["missing_rate_g"]
+        row["missing_rate_i"] = meta["missing_rate_i"]
+        row["outlier_rate_g"] = meta["outlier_rate_g"]
+        row["outlier_rate_i"] = meta["outlier_rate_i"]
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -363,83 +436,133 @@ def save_csv(rows, output_path, missing_rate_g, missing_rate_i, outlier_rate):
 
 def print_summary(rows):
     print("\n=== SUMMARY ===")
-    rows_sorted = sorted(rows, key=lambda r: (-r["accuracy_vs_oracle"], r["mean_regret"]))
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["scenario"], []).append(row)
 
-    for r in rows_sorted:
-        print(
-            f"{r['method']:20s} | "
-            f"acc={r['accuracy_vs_oracle']:.4f} | "
-            f"mean_regret={r['mean_regret']:.6f} | "
-            f"p95={r['p95_regret']:.6f} | "
-            f"catastrophic={r['catastrophic_regret_rate']:.6f} | "
-            f"entropy={r['winner_entropy']:.6f}"
+    for scenario, scenario_rows in grouped.items():
+        print(f"\nScenario: {scenario}")
+        scenario_rows = sorted(
+            scenario_rows,
+            key=lambda r: (-r["accuracy_vs_oracle"], r["mean_regret"])
         )
 
-        if r["method"] == "ARA_adaptive":
+        for r in scenario_rows:
             print(
-                "   alpha shares: "
-                f"phi^-2={float(r['share_phi_inv2']):.4f}, "
-                f"phi^-1={float(r['share_phi_inv']):.4f}, "
-                f"1={float(r['share_one']):.4f}, "
-                f"phi={float(r['share_phi']):.4f}, "
-                f"phi^2={float(r['share_phi2']):.4f}"
+                f"{r['method']:20s} | "
+                f"acc={r['accuracy_vs_oracle']:.4f} | "
+                f"mean_regret={r['mean_regret']:.6f} | "
+                f"p95={r['p95_regret']:.6f} | "
+                f"catastrophic={r['catastrophic_regret_rate']:.6f} | "
+                f"entropy={r['winner_entropy']:.6f}"
             )
+
+            if r["method"] == "ARA_adaptive":
+                print(
+                    "   alpha shares: "
+                    f"phi^-2={float(r['share_phi_inv2']):.4f}, "
+                    f"phi^-1={float(r['share_phi_inv']):.4f}, "
+                    f"1={float(r['share_one']):.4f}, "
+                    f"phi={float(r['share_phi']):.4f}, "
+                    f"phi^2={float(r['share_phi2']):.4f}"
+                )
 
 
 def run_test(
     n_mc=120000,
     seed=123,
-    missing_rate_g=0.08,
-    missing_rate_i=0.14,
-    outlier_rate=0.05,
-    outlier_scale_g=2.0,
-    outlier_scale_i=2.8,
+    sigma_corr=0.55,
+    sigma_tail_g=0.90,
+    sigma_tail_i=1.05,
+    outlier_rate_g=0.04,
+    outlier_rate_i=0.06,
+    outlier_scale_g=2.8,
+    outlier_scale_i=3.3,
+    missing_base_g=0.07,
+    missing_base_i=0.12,
     t_df=3,
 ):
     rng = np.random.default_rng(seed)
 
-    sig_g = np.full(M, 0.85)
-    sig_i = np.full(M, 0.85)
+    # latent clean truth
+    g_true_raw = np.repeat(G[:, :, None], n_mc, axis=2)
+    i_true_raw = np.repeat(I[:, :, None], n_mc, axis=2)
 
-    # Risk-like criteria: intuition more reliable
-    sig_g[7:10] = 1.25
-    sig_i[7:10] = 0.50
-
-    # Budget/measurement-like criteria: data more reliable
-    sig_g[4:6] = 0.45
-    sig_i[4:6] = 1.15
-
-    g_true = clip010(
-        G[:, :, None] + rng.normal(0, sig_g[:, None, None], size=(M, N_PROJECTS, n_mc))
+    # add reliability-driven latent noise
+    g_true_raw = clip010(
+        g_true_raw + rng.normal(0.0, SIG_G[:, None, None], size=g_true_raw.shape)
     )
-    i_true = clip010(
-        I[:, :, None] + rng.normal(0, sig_i[:, None, None], size=(M, N_PROJECTS, n_mc))
+    i_true_raw = clip010(
+        i_true_raw + rng.normal(0.0, SIG_I[:, None, None], size=i_true_raw.shape)
     )
 
-    g_obs = g_true.copy()
-    i_obs = i_true.copy()
+    # benefit-space clean oracle inputs
+    g_true = to_benefit_space(g_true_raw)
+    i_true = to_benefit_space(i_true_raw)
 
-    out_g = rng.random(size=g_obs.shape) < outlier_rate
-    out_i = rng.random(size=i_obs.shape) < outlier_rate
+    scenarios = {}
 
-    g_obs = clip010(
-        g_obs + out_g * rng.standard_t(df=t_df, size=g_obs.shape) * outlier_scale_g
+    # 1) Missingness-dominant
+    g_obs = g_true_raw + add_group_correlated_noise(rng, sigma_corr, g_true_raw.shape)
+    i_obs = i_true_raw + add_group_correlated_noise(rng, sigma_corr, i_true_raw.shape)
+    g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.75)
+    g_obs, miss_g = inject_nonrandom_missingness(rng, g_obs, base_rate=missing_base_g, tail_boost=0.10)
+    i_obs, miss_i = inject_nonrandom_missingness(rng, i_obs, base_rate=missing_base_i, tail_boost=0.14)
+    scenarios["missingness_dominant"] = (g_obs, i_obs, miss_g, miss_i, None, None)
+
+    # 2) Outlier-dominant
+    g_obs = g_true_raw + add_heavytail_noise(rng, sigma_tail_g, g_true_raw.shape, df=t_df)
+    i_obs = i_true_raw + add_heavytail_noise(rng, sigma_tail_i, i_true_raw.shape, df=t_df)
+    g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.85)
+    g_obs = inject_outliers(rng, g_obs, p_outlier=outlier_rate_g, magnitude=outlier_scale_g, df=t_df)
+    i_obs = inject_outliers(rng, i_obs, p_outlier=outlier_rate_i, magnitude=outlier_scale_i, df=t_df)
+    scenarios["outlier_dominant"] = (g_obs, i_obs, None, None, outlier_rate_g, outlier_rate_i)
+
+    # 3) Full robustness stress
+    g_obs = (
+        g_true_raw
+        + add_group_correlated_noise(rng, sigma_corr, g_true_raw.shape)
+        + add_heavytail_noise(rng, sigma_tail_g, g_true_raw.shape, df=t_df)
     )
-    i_obs = clip010(
-        i_obs + out_i * rng.standard_t(df=t_df, size=i_obs.shape) * outlier_scale_i
+    i_obs = (
+        i_true_raw
+        + add_group_correlated_noise(rng, sigma_corr, i_true_raw.shape)
+        + add_heavytail_noise(rng, sigma_tail_i, i_true_raw.shape, df=t_df)
     )
 
-    miss_g = rng.random(size=g_obs.shape) < missing_rate_g
-    miss_i = rng.random(size=i_obs.shape) < missing_rate_i
+    g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=1.00)
+    g_obs = inject_outliers(rng, g_obs, p_outlier=outlier_rate_g, magnitude=outlier_scale_g, df=t_df)
+    i_obs = inject_outliers(rng, i_obs, p_outlier=outlier_rate_i, magnitude=outlier_scale_i, df=t_df)
+    g_obs, miss_g = inject_nonrandom_missingness(rng, g_obs, base_rate=missing_base_g, tail_boost=0.12)
+    i_obs, miss_i = inject_nonrandom_missingness(rng, i_obs, base_rate=missing_base_i, tail_boost=0.16)
 
-    g_obs = fill_anchor(g_obs, miss_g, anchor=L)
-    i_obs = fill_anchor(i_obs, miss_i, anchor=L)
+    scenarios["full_robustness_stress"] = (g_obs, i_obs, miss_g, miss_i, outlier_rate_g, outlier_rate_i)
 
-    rows = evaluate(g_obs, i_obs, g_true, i_true, sig_g, sig_i)
+    all_rows = []
 
-    output_path = "extended_tests/results/csv/testD_adaptive_ara_missing_outlier_vs_mcda.csv"
-    save_csv(rows, output_path, missing_rate_g, missing_rate_i, outlier_rate)
-    print_summary(rows)
+    for scenario_name, (g_obs, i_obs, miss_g, miss_i, og, oi) in scenarios.items():
+        rows = evaluate(g_obs, i_obs, g_true, i_true, SIG_G, SIG_I)
+
+        missing_rate_g = float(np.mean(miss_g)) if miss_g is not None else 0.0
+        missing_rate_i = float(np.mean(miss_i)) if miss_i is not None else 0.0
+        out_rate_g = float(og) if og is not None else 0.0
+        out_rate_i = float(oi) if oi is not None else 0.0
+
+        for row in rows:
+            row["scenario"] = scenario_name
+
+        meta = {
+            "missing_rate_g": missing_rate_g,
+            "missing_rate_i": missing_rate_i,
+            "outlier_rate_g": out_rate_g,
+            "outlier_rate_i": out_rate_i,
+        }
+
+        output_path = f"extended_tests/results/csv/testD_{scenario_name}.csv"
+        save_csv(rows, output_path, meta)
+        all_rows.extend(rows)
+
+    print_summary(all_rows)
 
 
 if __name__ == "__main__":
