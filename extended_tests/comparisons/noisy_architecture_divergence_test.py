@@ -82,11 +82,19 @@ def simulate_variable(rng, mean_d, sigma_d, mean_i, sigma_i, n):
 
     # occasional data shocks
     mask_d = rng.random(n) < 0.15
-    x_d[mask_d] = np.clip(rng.normal(mean_d - 0.12, sigma_d + 0.05, mask_d.sum()), 0.0, 1.0)
+    x_d[mask_d] = np.clip(
+        rng.normal(mean_d - 0.12, sigma_d + 0.05, mask_d.sum()),
+        0.0,
+        1.0,
+    )
 
     # occasional intuition corrections
     mask_i = rng.random(n) < 0.25
-    x_i[mask_i] = np.clip(rng.normal(mean_i + 0.10, sigma_i, mask_i.sum()), 0.0, 1.0)
+    x_i[mask_i] = np.clip(
+        rng.normal(mean_i + 0.10, sigma_i, mask_i.sum()),
+        0.0,
+        1.0,
+    )
 
     return x_d, x_i
 
@@ -104,15 +112,19 @@ def main():
         truth_matrix[var] = np.full(N, TRUE_MEANS[var])
         x_d, x_i = simulate_variable(
             rng,
-            DATA_MEANS[var], DATA_SIGMAS[var],
-            INTUITION_MEANS[var], INTUITION_SIGMAS[var],
-            N
+            DATA_MEANS[var],
+            DATA_SIGMAS[var],
+            INTUITION_MEANS[var],
+            INTUITION_SIGMAS[var],
+            N,
         )
         data_matrix[var] = x_d
         intuition_matrix[var] = x_i
 
-    out_dir = Path("results")
-    out_dir.mkdir(exist_ok=True)
+    # Save into extended_tests/results/csv
+    base_dir = Path(__file__).resolve().parents[1]   # extended_tests
+    out_dir = base_dir / "results" / "csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Architecture ARA
     arch_outputs = []
@@ -134,6 +146,7 @@ def main():
         for var in variables:
             xb = ara_balance(data_matrix[var], intuition_matrix[var], alpha)
             per_var.append(xb)
+
         per_var = np.vstack(per_var)
         output = np.mean(per_var, axis=0)
 
@@ -215,17 +228,24 @@ def main():
     with open(out_dir / "test2_noisy_architecture_comparison.csv", "w", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["method", "alpha", "mean_output", "mae_vs_truth", "mse_vs_truth"]
+            fieldnames=[
+                "method",
+                "alpha",
+                "mean_output",
+                "mae_vs_truth",
+                "mse_vs_truth",
+            ],
         )
         writer.writeheader()
         writer.writerows(comparison_rows)
 
-    # Optional: variable-level architecture diagnostics
+    # 4) Variable-level architecture diagnostics
     variable_rows = []
     for var in variables:
         alpha = LOCAL_REGIMES[var]
         xb = ara_balance(data_matrix[var], intuition_matrix[var], alpha)
         xt = truth_matrix[var]
+
         variable_rows.append({
             "variable": var,
             "local_alpha": alpha,
@@ -253,6 +273,9 @@ def main():
         )
         writer.writeheader()
         writer.writerows(variable_rows)
+
+    print(f"Saved: {out_dir / 'test2_noisy_architecture_comparison.csv'}")
+    print(f"Saved: {out_dir / 'test2_noisy_architecture_variables.csv'}")
 
 
 if __name__ == "__main__":
