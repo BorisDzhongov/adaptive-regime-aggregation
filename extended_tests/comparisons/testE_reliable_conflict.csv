@@ -37,7 +37,10 @@ OUTDIR.mkdir(parents=True, exist_ok=True)
 # ------------------------------------------------------------
 def normalized_entropy(win_counts):
     probs = np.array(win_counts, dtype=float)
-    probs /= probs.sum()
+    total = probs.sum()
+    if total <= 0:
+        return 0.0
+    probs /= total
     probs = probs[probs > 0]
     if len(probs) == 0:
         return 0.0
@@ -73,7 +76,6 @@ def topsis_scores(X):
 
 
 def promethee_ii_scores(X):
-    # simple linear preference on pairwise differences
     m = X.shape[1]
     pref = np.zeros((m, m), dtype=float)
 
@@ -82,8 +84,7 @@ def promethee_ii_scores(X):
             if a == b:
                 continue
             diff = X[:, a] - X[:, b]
-            p = np.maximum(diff, 0.0).mean()
-            pref[a, b] = p
+            pref[a, b] = np.maximum(diff, 0.0).mean()
 
     leaving = pref.mean(axis=1)
     entering = pref.mean(axis=0)
@@ -116,9 +117,8 @@ def electre_i_scores(X, concordance_threshold=0.60, discordance_threshold=0.30):
 # ------------------------------------------------------------
 def choose_alpha(r_g, r_i):
     # Choose regime ONLY from relative reliability, not from disagreement magnitude.
-    # This is intentional:
-    # If both subsystems are equally reliable (even if they disagree strongly),
-    # ARA should remain near balance rather than jump to extremes.
+    # If both subsystems are similarly reliable, ARA should remain near balance
+    # even when their values differ substantially.
     share_i = r_i / (r_g + r_i + 1e-12)
 
     if share_i >= 0.80:
@@ -133,10 +133,8 @@ def choose_alpha(r_g, r_i):
 
 
 def ara_adaptive_scores(G, I, Rg, Ri, anchor=ANCHOR, anchor_weight=0.25):
-    # G, I, Rg, Ri shape: (criteria, projects)
     K, P = G.shape
     X = np.zeros((K, P), dtype=float)
-
     regime_counts = {k: 0 for k in REGIMES.keys()}
 
     for k in range(K):
@@ -154,17 +152,11 @@ def ara_adaptive_scores(G, I, Rg, Ri, anchor=ANCHOR, anchor_weight=0.25):
 
 # ------------------------------------------------------------
 # Scenario generators
-# Each returns:
-#   truth      : true latent criterion-project matrix
-#   G_obs      : subsystem G observations
-#   I_obs      : subsystem I observations
-#   Rg, Ri     : reliability matrices in [0,1]
 # ------------------------------------------------------------
 def scenario_reliable_conflict(rng):
     # Both subsystems reliable, low noise, but strong disagreement in value levels.
     truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
 
-    # large structured disagreement
     gap = rng.uniform(1.8, 3.0, size=(N_CRITERIA, 1))
     sign = rng.choice([-1.0, 1.0], size=(N_CRITERIA, 1))
 
@@ -192,18 +184,16 @@ def scenario_complementary_reliability(rng):
 
     for k in range(N_CRITERIA):
         for p in range(N_PROJECTS):
-            g_reliable = bool(rng.integers(0, 2))  # random which subsystem is reliable
+            g_reliable = bool(rng.integers(0, 2))
 
             if g_reliable:
                 Rg[k, p] = 0.92
                 Ri[k, p] = 0.35
-
                 G_obs[k, p] = truth[k, p] + rng.normal(0.0, 0.20)
                 I_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
             else:
                 Rg[k, p] = 0.35
                 Ri[k, p] = 0.92
-
                 G_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
                 I_obs[k, p] = truth[k, p] + rng.normal(0.0, 0.20)
 
@@ -211,13 +201,19 @@ def scenario_complementary_reliability(rng):
 
 
 # ------------------------------------------------------------
+# Benchmark input for classical MCDA
+# IMPORTANT:
+# Classical MCDA methods should NOT receive local reliability-aware
+# variable-by-variable coordination, because that would import part
+# of ARA's adaptive architecture into the baseline.
+# ------------------------------------------------------------
+def pooled_matrix_for_mcda(G, I):
+    return 0.5 * (G + I)
+
+
+# ------------------------------------------------------------
 # Benchmark runner
 # ------------------------------------------------------------
-def pooled_matrix(G, I, Rg, Ri):
-    # Reliability-aware collapse for classical MCDA methods
-    return (Rg * G + Ri * I) / (Rg + Ri + 1e-12)
-
-
 def run_scenario(name, generator, n_reps=N_REPS):
     methods = [
         "ARA_adaptive",
@@ -251,8 +247,8 @@ def run_scenario(name, generator, n_reps=N_REPS):
             ara_regime_total[k] += v
         total_cells += N_CRITERIA * N_PROJECTS
 
-        # Classical methods on pooled matrix
-        X = pooled_matrix(G, I, Rg, Ri)
+        # Classical methods on a non-adaptive pooled matrix
+        X = pooled_matrix_for_mcda(G, I)
 
         method_scores = {
             "WSM": wsm_scores(X),
@@ -292,7 +288,10 @@ def run_scenario(name, generator, n_reps=N_REPS):
             probs = win_counts[m] / float(n_reps)
 
             if m == "ARA_adaptive":
-                shares = {k: ara_regime_total[k] / float(total_cells) for k in REGIMES.keys()}
+                shares = {
+                    k: round(ara_regime_total[k] / float(total_cells), 6)
+                    for k in REGIMES.keys()
+                }
             else:
                 shares = {k: "" for k in REGIMES.keys()}
 
