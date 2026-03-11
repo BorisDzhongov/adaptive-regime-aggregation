@@ -28,7 +28,7 @@ ANCHOR = 5.0
 N_REPS = 3000
 RNG = np.random.default_rng(42)
 
-OUTDIR = Path("results")
+OUTDIR = Path("extended_tests/results/csv")
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 
