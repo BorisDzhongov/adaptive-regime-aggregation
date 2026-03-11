@@ -49,11 +49,10 @@ M, N_PROJECTS = G.shape
 # 1 = benefit, -1 = cost
 CRITERION_SIGN = np.array([1, 1, -1, 1, -1, 1, 1, -1, -1, 1, 1], dtype=float)
 
-# criterion-specific reliability in [0,1]
+# Architect-defined prior reliability in [0,1]
 RELIABILITY_G = np.array([0.92, 0.88, 0.72, 0.85, 0.76, 0.90, 0.82, 0.68, 0.65, 0.80, 0.91], dtype=float)
 RELIABILITY_I = np.array([0.80, 0.86, 0.70, 0.83, 0.74, 0.78, 0.79, 0.64, 0.60, 0.76, 0.88], dtype=float)
 
-# group structure to induce correlated shocks
 GROUPS = {
     "economic": [0, 1, 4],
     "operational": [2, 3, 5, 6],
@@ -68,22 +67,10 @@ def clip010(x):
     return np.clip(x, 0.0, 10.0)
 
 def to_benefit_space(x):
-    """
-    Convert mixed benefit/cost criteria to a common benefit-oriented scale.
-    Cost criteria are reflected around 10: x -> 10 - x
-    """
     sign = CRITERION_SIGN[:, None, None]
     return np.where(sign > 0, x, 10.0 - x)
 
-def nanmean_keepdims(x, axis):
-    return np.nanmean(x, axis=axis, keepdims=True)
-
 def safe_fill_nan_with_criterion_mean(x):
-    """
-    x shape: (criteria, projects, mc)
-    Fill NaN with within-run criterion mean. If whole criterion-run is NaN,
-    fall back to L.
-    """
     means = np.nanmean(x, axis=1, keepdims=True)
     means = np.where(np.isnan(means), L, means)
     return np.where(np.isnan(x), means, x)
@@ -96,6 +83,9 @@ def winners(scores):
 
 def winner_entropy(freq):
     return -np.sum(freq * np.log(freq + 1e-12))
+
+def expand_prior_reliability(rel_1d, shape):
+    return np.repeat(rel_1d[:, None, None], shape[1], axis=1).repeat(shape[2], axis=2)
 
 # ---------------------------------------------------------------------
 # MCDA scoring
@@ -183,42 +173,130 @@ def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
     return phi_plus - phi_minus
 
 # ---------------------------------------------------------------------
+# Reliability interpretation for ARA
+# ---------------------------------------------------------------------
+def boundary_stress_indicator(raw):
+    """
+    Higher value when observation is outside or too close to the boundaries.
+    Returns penalty in [0,1].
+    """
+    raw_filled = np.where(np.isnan(raw), L, raw)
+
+    clipped_outside = ((raw_filled < 0.0) | (raw_filled > 10.0)).astype(float)
+
+    # near-boundary stress inside [0,10]
+    dist_to_boundary = np.minimum(np.abs(raw_filled - 0.0), np.abs(raw_filled - 10.0))
+    near_boundary = np.clip((1.0 - dist_to_boundary) / 1.0, 0.0, 1.0)
+
+    penalty = np.maximum(clipped_outside, near_boundary)
+    penalty = np.where(np.isnan(raw), 1.0, penalty)
+    return penalty
+
+def group_instability_indicator(x_benefit):
+    """
+    Measures how much a criterion deviates from its group pattern
+    within the same project/run. Returns penalty in [0,1].
+    """
+    x = safe_fill_nan_with_criterion_mean(x_benefit)
+    penalty = np.zeros_like(x, dtype=float)
+
+    for _, idxs in GROUPS.items():
+        idxs = np.array(idxs, dtype=int)
+        group_mean = np.mean(x[idxs, :, :], axis=0, keepdims=True)
+        dev = np.abs(x[idxs, :, :] - group_mean)
+
+        # scale relative to [0,10] interval
+        penalty[idxs, :, :] = np.clip(dev / 3.0, 0.0, 1.0)
+
+    return penalty
+
+def disagreement_penalty(g_benefit, i_benefit):
+    """
+    Symmetric penalty: larger subsystem disagreement slightly reduces
+    confidence in both unless prior reliability compensates.
+    """
+    diff = np.abs(g_benefit - i_benefit)
+    return np.clip(diff / 4.0, 0.0, 1.0)
+
+def interpret_reliability(raw_obs, benefit_obs, prior_rel_1d, cross_penalty=None):
+    """
+    Architect-defined reliability interpretation:
+    prior reliability + observable penalties.
+
+    Returns interpreted reliability in [0,1].
+    """
+    prior = expand_prior_reliability(prior_rel_1d, raw_obs.shape)
+
+    missing_pen = np.isnan(raw_obs).astype(float)
+    boundary_pen = boundary_stress_indicator(raw_obs)
+    group_pen = group_instability_indicator(benefit_obs)
+
+    if cross_penalty is None:
+        cross_penalty = np.zeros_like(benefit_obs, dtype=float)
+
+    # Architecturally chosen combination
+    rel = (
+        0.60 * prior
+        + 0.15 * (1.0 - missing_pen)
+        + 0.10 * (1.0 - boundary_pen)
+        + 0.10 * (1.0 - group_pen)
+        + 0.05 * (1.0 - cross_penalty)
+    )
+
+    return np.clip(rel, 0.0, 1.0)
+
+# ---------------------------------------------------------------------
 # ARA
 # ---------------------------------------------------------------------
-def select_adaptive_alpha(g_obs, i_obs):
+def select_adaptive_alpha_from_reliability(rel_g, rel_i):
     """
-    Stronger adaptive logic for stress setting.
-
-    Inputs assumed already in benefit space.
+    Alpha is chosen from interpreted reliability, not from value direction.
+    Positive reliability gap in favor of I -> phi / phi^2
+    Negative reliability gap in favor of G -> phi^-1 / phi^-2
     """
-    delta = i_obs - g_obs
-    abs_delta = np.abs(delta)
+    rel_gap = rel_i - rel_g
+    abs_gap = np.abs(rel_gap)
 
-    alpha = np.ones_like(delta, dtype=float)
+    alpha = np.ones_like(rel_gap, dtype=float)
 
-    mild = (abs_delta >= 0.60) & (abs_delta < 1.40)
-    strong = (abs_delta >= 1.40) & (abs_delta < 2.40)
-    extreme = abs_delta >= 2.40
+    mild = (abs_gap >= 0.05) & (abs_gap < 0.15)
+    strong = abs_gap >= 0.15
 
-    alpha[mild & (delta > 0)] = PHI
-    alpha[mild & (delta < 0)] = PHI_INV
+    alpha[mild & (rel_gap > 0)] = PHI
+    alpha[mild & (rel_gap < 0)] = PHI_INV
 
-    alpha[strong & (delta > 0)] = PHI2
-    alpha[strong & (delta < 0)] = PHI_INV2
-
-    # extreme conflict: amplify same directional leaning
-    alpha[extreme & (delta > 0)] = PHI2
-    alpha[extreme & (delta < 0)] = PHI_INV2
+    alpha[strong & (rel_gap > 0)] = PHI2
+    alpha[strong & (rel_gap < 0)] = PHI_INV2
 
     return alpha
 
-def ara_adaptive_operator(g_obs, i_obs, ell=L):
+def ara_adaptive_operator(g_obs_raw, i_obs_raw, ell=L):
+    g_obs = to_benefit_space(clip010(g_obs_raw))
+    i_obs = to_benefit_space(clip010(i_obs_raw))
+
     g_obs = safe_fill_nan_with_criterion_mean(g_obs)
     i_obs = safe_fill_nan_with_criterion_mean(i_obs)
 
-    alpha = select_adaptive_alpha(g_obs, i_obs)
+    cross_pen = disagreement_penalty(g_obs, i_obs)
+
+    rel_g = interpret_reliability(
+        raw_obs=g_obs_raw,
+        benefit_obs=g_obs,
+        prior_rel_1d=RELIABILITY_G,
+        cross_penalty=cross_pen,
+    )
+
+    rel_i = interpret_reliability(
+        raw_obs=i_obs_raw,
+        benefit_obs=i_obs,
+        prior_rel_1d=RELIABILITY_I,
+        cross_penalty=cross_pen,
+    )
+
+    alpha = select_adaptive_alpha_from_reliability(rel_g, rel_i)
     x = (ell + g_obs + alpha * i_obs) / (2.0 + alpha)
-    return x, alpha
+
+    return x, alpha, rel_g, rel_i
 
 def alpha_shares(alpha):
     total = alpha.size
@@ -234,9 +312,6 @@ def alpha_shares(alpha):
 # Oracle
 # ---------------------------------------------------------------------
 def oracle_scores(g_true, i_true):
-    """
-    Oracle from latent clean balanced state in benefit space.
-    """
     x = 0.5 * (g_true + i_true)
     return score_mean(x)
 
@@ -244,10 +319,6 @@ def oracle_scores(g_true, i_true):
 # Noise / corruption generators
 # ---------------------------------------------------------------------
 def add_group_correlated_noise(rng, sigma, shape):
-    """
-    Correlated criterion shocks by group.
-    shape: (criteria, projects, mc)
-    """
     out = np.zeros(shape, dtype=float)
     _, n_projects, n_mc = shape
 
@@ -260,9 +331,6 @@ def add_group_correlated_noise(rng, sigma, shape):
     return out
 
 def add_reliability_scaled_noise(rng, sigma, shape, reliability):
-    """
-    Lower reliability -> more noise
-    """
     base = rng.normal(0.0, sigma, size=shape)
     scale = (1.35 - reliability)[:, None, None]
     return base * scale
@@ -289,14 +357,9 @@ def inject_outliers(rng, x, p_outlier=0.025, magnitude=3.2):
     return y
 
 def inject_regime_conflict_shift(rng, g, i, strength=0.9):
-    """
-    Create structured disagreement:
-    some criteria-project cells pushed upward in G and downward in I, and vice versa.
-    """
     g2 = g.copy()
     i2 = i.copy()
 
-    # deterministic masks by project and criterion pattern
     for k in range(M):
         for p in range(N_PROJECTS):
             sign = 1.0 if ((k + p) % 2 == 0) else -1.0
@@ -338,11 +401,6 @@ def evaluate_single_method(method_name, scores, oracle, oracle_w, oracle_best, e
     return row
 
 def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
-    """
-    Inputs:
-    - g_true, i_true already in benefit space and clean
-    - g_obs_raw, i_obs_raw raw observed matrices with corruption
-    """
     g_obs = to_benefit_space(clip010(g_obs_raw))
     i_obs = to_benefit_space(clip010(i_obs_raw))
 
@@ -352,11 +410,11 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
 
     rows = []
 
-    # ARA adaptive
-    x_ara, alpha = ara_adaptive_operator(g_obs, i_obs)
+    # ARA adaptive by interpreted reliability
+    x_ara, alpha, rel_g, rel_i = ara_adaptive_operator(g_obs_raw, i_obs_raw)
     rows.append(
         evaluate_single_method(
-            method_name="ARA_adaptive",
+            method_name="ARA_adaptive_reliability",
             scores=score_mean(x_ara),
             oracle=oracle,
             oracle_w=oracle_w,
@@ -460,14 +518,14 @@ def print_summary(rows):
 
         for r in scenario_rows:
             print(
-                f"{r['method']:20s} | "
+                f"{r['method']:28s} | "
                 f"acc={r['accuracy_vs_oracle']:.4f} | "
                 f"mean_regret={r['mean_regret']:.6f} | "
                 f"p95={r['p95_regret']:.6f} | "
                 f"entropy={r['winner_entropy']:.6f}"
             )
 
-            if r["method"] == "ARA_adaptive":
+            if r["method"] == "ARA_adaptive_reliability":
                 print(
                     "   alpha shares: "
                     f"phi^-2={float(r['share_phi_inv2']):.4f}, "
@@ -483,7 +541,6 @@ def print_summary(rows):
 def run_test(n_mc=100000, sigma=0.95, seed=42):
     rng = np.random.default_rng(seed)
 
-    # latent clean truth in raw mixed-sign scale, then transformed to benefit space
     g_true_raw = np.repeat(G[:, :, None], n_mc, axis=2)
     i_true_raw = np.repeat(I[:, :, None], n_mc, axis=2)
 
@@ -514,7 +571,7 @@ def run_test(n_mc=100000, sigma=0.95, seed=42):
     i_obs = inject_outliers(rng, i_true_raw + eps_i, p_outlier=0.03, magnitude=3.5)
     scenarios["heavytail_outliers"] = (g_obs, i_obs)
 
-    # 4) Full stress: correlated + asymmetric + missing + outliers + conflict
+    # 4) Full stress
     eps_g = (
         add_group_correlated_noise(rng, sigma, g_true_raw.shape) +
         add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G) +
