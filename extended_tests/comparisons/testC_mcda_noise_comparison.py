@@ -10,6 +10,9 @@ PHI_INV2 = 1.0 / (PHI ** 2)
 L = 5.0
 PROJECTS = ["A", "B", "C", "D"]
 
+# ---------------------------------------------------------------------
+# Base matrices from Example II
+# ---------------------------------------------------------------------
 G = np.array([
     [8.5, 7.0, 9.0, 6.5],
     [7.5, 8.5, 6.5, 6.2],
@@ -40,23 +43,70 @@ I = np.array([
 
 M, N_PROJECTS = G.shape
 
+# ---------------------------------------------------------------------
+# Criterion meta-structure for a harder aggregation problem
+# ---------------------------------------------------------------------
+# 1 = benefit, -1 = cost
+CRITERION_SIGN = np.array([1, 1, -1, 1, -1, 1, 1, -1, -1, 1, 1], dtype=float)
 
+# criterion-specific reliability in [0,1]
+RELIABILITY_G = np.array([0.92, 0.88, 0.72, 0.85, 0.76, 0.90, 0.82, 0.68, 0.65, 0.80, 0.91], dtype=float)
+RELIABILITY_I = np.array([0.80, 0.86, 0.70, 0.83, 0.74, 0.78, 0.79, 0.64, 0.60, 0.76, 0.88], dtype=float)
+
+# group structure to induce correlated shocks
+GROUPS = {
+    "economic": [0, 1, 4],
+    "operational": [2, 3, 5, 6],
+    "risk": [7, 8],
+    "strategic": [9, 10],
+}
+
+# ---------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------
 def clip010(x):
     return np.clip(x, 0.0, 10.0)
 
+def to_benefit_space(x):
+    """
+    Convert mixed benefit/cost criteria to a common benefit-oriented scale.
+    Cost criteria are reflected around 10: x -> 10 - x
+    """
+    sign = CRITERION_SIGN[:, None, None]
+    return np.where(sign > 0, x, 10.0 - x)
+
+def nanmean_keepdims(x, axis):
+    return np.nanmean(x, axis=axis, keepdims=True)
+
+def safe_fill_nan_with_criterion_mean(x):
+    """
+    x shape: (criteria, projects, mc)
+    Fill NaN with within-run criterion mean. If whole criterion-run is NaN,
+    fall back to L.
+    """
+    means = np.nanmean(x, axis=1, keepdims=True)
+    means = np.where(np.isnan(means), L, means)
+    return np.where(np.isnan(x), means, x)
 
 def aggregate_mean(g, i):
     return 0.5 * (g + i)
 
+def winners(scores):
+    return np.argmax(scores, axis=0)
 
+def winner_entropy(freq):
+    return -np.sum(freq * np.log(freq + 1e-12))
+
+# ---------------------------------------------------------------------
+# MCDA scoring
+# ---------------------------------------------------------------------
 def score_mean(x):
-    # x shape: (criteria, projects, mc)
+    x = safe_fill_nan_with_criterion_mean(x)
     return x.mean(axis=0)
 
-
 def score_topsis(x):
-    # x shape: (criteria, projects, mc)
-    # normalize by criterion within each mc run
+    x = safe_fill_nan_with_criterion_mean(x)
+
     denom = np.sqrt(np.sum(x ** 2, axis=1, keepdims=True))
     denom = np.where(denom == 0.0, 1.0, denom)
 
@@ -71,9 +121,9 @@ def score_topsis(x):
 
     return d_neg / (d_pos + d_neg + 1e-12)
 
-
 def score_promethee_ii(x):
-    # x shape: (criteria, projects, mc)
+    x = safe_fill_nan_with_criterion_mean(x)
+
     minv = np.min(x, axis=1, keepdims=True)
     maxv = np.max(x, axis=1, keepdims=True)
     rng = np.where((maxv - minv) == 0.0, 1.0, (maxv - minv))
@@ -102,17 +152,13 @@ def score_promethee_ii(x):
 
     return flows
 
-
 def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
-    """
-    Simplified ELECTRE I-style outranking score.
-    Returns net outranking flow per project per MC run.
-    x shape: (criteria, projects, mc)
-    """
+    x = safe_fill_nan_with_criterion_mean(x)
+
     minv = np.min(x, axis=1, keepdims=True)
     maxv = np.max(x, axis=1, keepdims=True)
     rng = np.where((maxv - minv) == 0.0, 1.0, (maxv - minv))
-    xn = (x - minv) / rng  # normalized benefit matrix
+    xn = (x - minv) / rng
 
     mc = x.shape[2]
     outrank = np.zeros((N_PROJECTS, N_PROJECTS, mc), dtype=float)
@@ -123,7 +169,6 @@ def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
                 continue
 
             diff = xn[:, a, :] - xn[:, b, :]
-
             concordance = np.mean(diff >= 0.0, axis=0)
             discordance = np.max(np.maximum(-diff, 0.0), axis=0)
 
@@ -137,59 +182,23 @@ def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
 
     return phi_plus - phi_minus
 
-
-def winners(scores):
-    return np.argmax(scores, axis=0)
-
-
-def winner_entropy(freq):
-    return -np.sum(freq * np.log(freq + 1e-12))
-
-
-def oracle_scores(g_true, i_true):
-    """
-    Oracle = true balanced state based on the latent clean signal.
-    """
-    x = 0.5 * (g_true + i_true)
-    return score_mean(x)
-
-
-def noise_symmetric(rng, sigma, shape):
-    return rng.normal(0.0, sigma, size=shape)
-
-
-def noise_asymmetric(rng, sigma, shape):
-    z = rng.normal(0.0, sigma, size=shape)
-    skew = rng.exponential(scale=sigma * 0.35, size=shape) - sigma * 0.35
-    return z + skew
-
-
-def noise_heavytail(rng, sigma, shape, df=3):
-    return rng.standard_t(df=df, size=shape) * sigma
-
-
+# ---------------------------------------------------------------------
+# ARA
+# ---------------------------------------------------------------------
 def select_adaptive_alpha(g_obs, i_obs):
     """
-    Local adaptive alpha selection for each cell (criterion, project, mc).
+    Stronger adaptive logic for stress setting.
 
-    Logic:
-    - small disagreement -> alpha = 1
-    - moderate disagreement:
-        I > G -> phi
-        I < G -> 1/phi
-    - strong disagreement:
-        I > G -> phi^2
-        I < G -> 1/phi^2
-
-    This makes ARA adaptive per local situation, not constant per test.
+    Inputs assumed already in benefit space.
     """
     delta = i_obs - g_obs
     abs_delta = np.abs(delta)
 
     alpha = np.ones_like(delta, dtype=float)
 
-    mild = (abs_delta >= 0.50) & (abs_delta < 1.25)
-    strong = abs_delta >= 1.25
+    mild = (abs_delta >= 0.60) & (abs_delta < 1.40)
+    strong = (abs_delta >= 1.40) & (abs_delta < 2.40)
+    extreme = abs_delta >= 2.40
 
     alpha[mild & (delta > 0)] = PHI
     alpha[mild & (delta < 0)] = PHI_INV
@@ -197,14 +206,19 @@ def select_adaptive_alpha(g_obs, i_obs):
     alpha[strong & (delta > 0)] = PHI2
     alpha[strong & (delta < 0)] = PHI_INV2
 
+    # extreme conflict: amplify same directional leaning
+    alpha[extreme & (delta > 0)] = PHI2
+    alpha[extreme & (delta < 0)] = PHI_INV2
+
     return alpha
 
-
 def ara_adaptive_operator(g_obs, i_obs, ell=L):
+    g_obs = safe_fill_nan_with_criterion_mean(g_obs)
+    i_obs = safe_fill_nan_with_criterion_mean(i_obs)
+
     alpha = select_adaptive_alpha(g_obs, i_obs)
     x = (ell + g_obs + alpha * i_obs) / (2.0 + alpha)
     return x, alpha
-
 
 def alpha_shares(alpha):
     total = alpha.size
@@ -216,7 +230,85 @@ def alpha_shares(alpha):
         "share_phi2": float(np.sum(np.isclose(alpha, PHI2)) / total),
     }
 
+# ---------------------------------------------------------------------
+# Oracle
+# ---------------------------------------------------------------------
+def oracle_scores(g_true, i_true):
+    """
+    Oracle from latent clean balanced state in benefit space.
+    """
+    x = 0.5 * (g_true + i_true)
+    return score_mean(x)
 
+# ---------------------------------------------------------------------
+# Noise / corruption generators
+# ---------------------------------------------------------------------
+def add_group_correlated_noise(rng, sigma, shape):
+    """
+    Correlated criterion shocks by group.
+    shape: (criteria, projects, mc)
+    """
+    out = np.zeros(shape, dtype=float)
+    _, n_projects, n_mc = shape
+
+    for _, idxs in GROUPS.items():
+        idxs = np.array(idxs, dtype=int)
+        common = rng.normal(0.0, sigma, size=(1, n_projects, n_mc))
+        idio = rng.normal(0.0, sigma * 0.55, size=(len(idxs), n_projects, n_mc))
+        out[idxs, :, :] = 0.70 * common + 0.60 * idio
+
+    return out
+
+def add_reliability_scaled_noise(rng, sigma, shape, reliability):
+    """
+    Lower reliability -> more noise
+    """
+    base = rng.normal(0.0, sigma, size=shape)
+    scale = (1.35 - reliability)[:, None, None]
+    return base * scale
+
+def add_asymmetric_bias(rng, sigma, shape):
+    z = rng.normal(0.0, sigma * 0.45, size=shape)
+    skew = rng.exponential(scale=sigma * 0.28, size=shape) - sigma * 0.28
+    return z + skew
+
+def add_heavytail_noise(rng, sigma, shape, df=3):
+    return rng.standard_t(df=df, size=shape) * sigma
+
+def inject_missingness(rng, x, p_missing=0.08):
+    mask = rng.random(size=x.shape) < p_missing
+    y = x.copy()
+    y[mask] = np.nan
+    return y
+
+def inject_outliers(rng, x, p_outlier=0.025, magnitude=3.2):
+    y = x.copy()
+    mask = rng.random(size=x.shape) < p_outlier
+    shocks = rng.normal(0.0, magnitude, size=x.shape)
+    y[mask] = y[mask] + shocks[mask]
+    return y
+
+def inject_regime_conflict_shift(rng, g, i, strength=0.9):
+    """
+    Create structured disagreement:
+    some criteria-project cells pushed upward in G and downward in I, and vice versa.
+    """
+    g2 = g.copy()
+    i2 = i.copy()
+
+    # deterministic masks by project and criterion pattern
+    for k in range(M):
+        for p in range(N_PROJECTS):
+            sign = 1.0 if ((k + p) % 2 == 0) else -1.0
+            shift = strength * sign
+            g2[k, p, :] += shift
+            i2[k, p, :] -= shift
+
+    return g2, i2
+
+# ---------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------
 def evaluate_single_method(method_name, scores, oracle, oracle_w, oracle_best, extra=None):
     w = winners(scores)
     chosen = oracle[w, np.arange(oracle.shape[1])]
@@ -245,15 +337,22 @@ def evaluate_single_method(method_name, scores, oracle, oracle_w, oracle_best, e
 
     return row
 
+def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
+    """
+    Inputs:
+    - g_true, i_true already in benefit space and clean
+    - g_obs_raw, i_obs_raw raw observed matrices with corruption
+    """
+    g_obs = to_benefit_space(clip010(g_obs_raw))
+    i_obs = to_benefit_space(clip010(i_obs_raw))
 
-def evaluate_methods(g_obs, i_obs, g_true, i_true):
     oracle = oracle_scores(g_true, i_true)
     oracle_w = winners(oracle)
     oracle_best = oracle[oracle_w, np.arange(oracle.shape[1])]
 
     rows = []
 
-    # 1) Adaptive ARA only
+    # ARA adaptive
     x_ara, alpha = ara_adaptive_operator(g_obs, i_obs)
     rows.append(
         evaluate_single_method(
@@ -266,7 +365,7 @@ def evaluate_methods(g_obs, i_obs, g_true, i_true):
         )
     )
 
-    # 2) Plain direct MCDA methods on the observed combined matrix
+    # Plain direct MCDA on observed combined matrix
     x_plain = aggregate_mean(g_obs, i_obs)
 
     rows.append(
@@ -311,7 +410,9 @@ def evaluate_methods(g_obs, i_obs, g_true, i_true):
 
     return rows
 
-
+# ---------------------------------------------------------------------
+# CSV / reporting
+# ---------------------------------------------------------------------
 def save_csv(rows, output_path):
     if not rows:
         return
@@ -342,7 +443,6 @@ def save_csv(rows, output_path):
         writer.writerows(rows)
 
     print(f"Saved: {output_path}")
-
 
 def print_summary(rows):
     print("\n=== SUMMARY ===")
@@ -377,26 +477,64 @@ def print_summary(rows):
                     f"phi^2={float(r['share_phi2']):.4f}"
                 )
 
-
-def run_test(n_mc=100000, sigma=0.8, seed=42):
+# ---------------------------------------------------------------------
+# Main stress test
+# ---------------------------------------------------------------------
+def run_test(n_mc=100000, sigma=0.95, seed=42):
     rng = np.random.default_rng(seed)
 
-    g_true = np.repeat(G[:, :, None], n_mc, axis=2)
-    i_true = np.repeat(I[:, :, None], n_mc, axis=2)
+    # latent clean truth in raw mixed-sign scale, then transformed to benefit space
+    g_true_raw = np.repeat(G[:, :, None], n_mc, axis=2)
+    i_true_raw = np.repeat(I[:, :, None], n_mc, axis=2)
+
+    g_true = to_benefit_space(g_true_raw)
+    i_true = to_benefit_space(i_true_raw)
 
     scenarios = {}
 
-    eps_g = noise_symmetric(rng, sigma, g_true.shape)
-    eps_i = noise_symmetric(rng, sigma, i_true.shape)
-    scenarios["symmetric"] = (clip010(g_true + eps_g), clip010(i_true + eps_i))
+    # 1) Correlated + reliability-scaled Gaussian stress
+    eps_g = add_group_correlated_noise(rng, sigma, g_true_raw.shape) + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G)
+    eps_i = add_group_correlated_noise(rng, sigma, i_true_raw.shape) + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I)
+    g_obs = g_true_raw + eps_g
+    i_obs = i_true_raw + eps_i
+    scenarios["correlated_reliability"] = (g_obs, i_obs)
 
-    eps_g = noise_asymmetric(rng, sigma, g_true.shape)
-    eps_i = noise_asymmetric(rng, sigma, i_true.shape)
-    scenarios["asymmetric"] = (clip010(g_true + eps_g), clip010(i_true + eps_i))
+    # 2) Asymmetric bias + conflict shift
+    eps_g = add_asymmetric_bias(rng, sigma, g_true_raw.shape)
+    eps_i = add_asymmetric_bias(rng, sigma, i_true_raw.shape)
+    g_obs = g_true_raw + eps_g
+    i_obs = i_true_raw + eps_i
+    g_obs, i_obs = inject_regime_conflict_shift(rng, g_obs, i_obs, strength=0.85)
+    scenarios["asymmetric_conflict"] = (g_obs, i_obs)
 
-    eps_g = noise_heavytail(rng, sigma, g_true.shape)
-    eps_i = noise_heavytail(rng, sigma, i_true.shape)
-    scenarios["heavytail"] = (clip010(g_true + eps_g), clip010(i_true + eps_i))
+    # 3) Heavy-tail + outliers
+    eps_g = add_heavytail_noise(rng, sigma, g_true_raw.shape, df=3)
+    eps_i = add_heavytail_noise(rng, sigma, i_true_raw.shape, df=3)
+    g_obs = inject_outliers(rng, g_true_raw + eps_g, p_outlier=0.03, magnitude=3.5)
+    i_obs = inject_outliers(rng, i_true_raw + eps_i, p_outlier=0.03, magnitude=3.5)
+    scenarios["heavytail_outliers"] = (g_obs, i_obs)
+
+    # 4) Full stress: correlated + asymmetric + missing + outliers + conflict
+    eps_g = (
+        add_group_correlated_noise(rng, sigma, g_true_raw.shape) +
+        add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G) +
+        add_asymmetric_bias(rng, sigma, g_true_raw.shape)
+    )
+    eps_i = (
+        add_group_correlated_noise(rng, sigma, i_true_raw.shape) +
+        add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I) +
+        add_asymmetric_bias(rng, sigma, i_true_raw.shape)
+    )
+
+    g_obs = g_true_raw + eps_g
+    i_obs = i_true_raw + eps_i
+    g_obs, i_obs = inject_regime_conflict_shift(rng, g_obs, i_obs, strength=1.00)
+    g_obs = inject_outliers(rng, g_obs, p_outlier=0.035, magnitude=3.8)
+    i_obs = inject_outliers(rng, i_obs, p_outlier=0.035, magnitude=3.8)
+    g_obs = inject_missingness(rng, g_obs, p_missing=0.10)
+    i_obs = inject_missingness(rng, i_obs, p_missing=0.10)
+
+    scenarios["full_stress"] = (g_obs, i_obs)
 
     all_rows = []
 
@@ -406,10 +544,9 @@ def run_test(n_mc=100000, sigma=0.8, seed=42):
             row["scenario"] = scenario_name
         all_rows.extend(rows)
 
-    output_path = "extended_tests/results/csv/testC_adaptive_ara_vs_mcda.csv"
+    output_path = "extended_tests/results/csv/testC_adaptive_ara_vs_mcda_stress.csv"
     save_csv(all_rows, output_path)
     print_summary(all_rows)
-
 
 if __name__ == "__main__":
     run_test()
