@@ -44,7 +44,7 @@ I = np.array([
 M, N_PROJECTS = G.shape
 
 # ---------------------------------------------------------------------
-# Criterion meta-structure for a harder aggregation problem
+# Criterion meta-structure
 # ---------------------------------------------------------------------
 # 1 = benefit, -1 = cost
 CRITERION_SIGN = np.array([1, 1, -1, 1, -1, 1, 1, -1, -1, 1, 1], dtype=float)
@@ -176,15 +176,10 @@ def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
 # Reliability interpretation for ARA
 # ---------------------------------------------------------------------
 def boundary_stress_indicator(raw):
-    """
-    Higher value when observation is outside or too close to the boundaries.
-    Returns penalty in [0,1].
-    """
     raw_filled = np.where(np.isnan(raw), L, raw)
 
     clipped_outside = ((raw_filled < 0.0) | (raw_filled > 10.0)).astype(float)
 
-    # near-boundary stress inside [0,10]
     dist_to_boundary = np.minimum(np.abs(raw_filled - 0.0), np.abs(raw_filled - 10.0))
     near_boundary = np.clip((1.0 - dist_to_boundary) / 1.0, 0.0, 1.0)
 
@@ -193,10 +188,6 @@ def boundary_stress_indicator(raw):
     return penalty
 
 def group_instability_indicator(x_benefit):
-    """
-    Measures how much a criterion deviates from its group pattern
-    within the same project/run. Returns penalty in [0,1].
-    """
     x = safe_fill_nan_with_criterion_mean(x_benefit)
     penalty = np.zeros_like(x, dtype=float)
 
@@ -204,27 +195,15 @@ def group_instability_indicator(x_benefit):
         idxs = np.array(idxs, dtype=int)
         group_mean = np.mean(x[idxs, :, :], axis=0, keepdims=True)
         dev = np.abs(x[idxs, :, :] - group_mean)
-
-        # scale relative to [0,10] interval
         penalty[idxs, :, :] = np.clip(dev / 3.0, 0.0, 1.0)
 
     return penalty
 
 def disagreement_penalty(g_benefit, i_benefit):
-    """
-    Symmetric penalty: larger subsystem disagreement slightly reduces
-    confidence in both unless prior reliability compensates.
-    """
     diff = np.abs(g_benefit - i_benefit)
     return np.clip(diff / 4.0, 0.0, 1.0)
 
 def interpret_reliability(raw_obs, benefit_obs, prior_rel_1d, cross_penalty=None):
-    """
-    Architect-defined reliability interpretation:
-    prior reliability + observable penalties.
-
-    Returns interpreted reliability in [0,1].
-    """
     prior = expand_prior_reliability(prior_rel_1d, raw_obs.shape)
 
     missing_pen = np.isnan(raw_obs).astype(float)
@@ -234,7 +213,6 @@ def interpret_reliability(raw_obs, benefit_obs, prior_rel_1d, cross_penalty=None
     if cross_penalty is None:
         cross_penalty = np.zeros_like(benefit_obs, dtype=float)
 
-    # Architecturally chosen combination
     rel = (
         0.60 * prior
         + 0.15 * (1.0 - missing_pen)
@@ -249,11 +227,6 @@ def interpret_reliability(raw_obs, benefit_obs, prior_rel_1d, cross_penalty=None
 # ARA
 # ---------------------------------------------------------------------
 def select_adaptive_alpha_from_reliability(rel_g, rel_i):
-    """
-    Alpha is chosen from interpreted reliability, not from value direction.
-    Positive reliability gap in favor of I -> phi / phi^2
-    Negative reliability gap in favor of G -> phi^-1 / phi^-2
-    """
     rel_gap = rel_i - rel_g
     abs_gap = np.abs(rel_gap)
 
@@ -410,7 +383,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
 
     rows = []
 
-    # ARA adaptive by interpreted reliability
     x_ara, alpha, rel_g, rel_i = ara_adaptive_operator(g_obs_raw, i_obs_raw)
     rows.append(
         evaluate_single_method(
@@ -423,7 +395,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
         )
     )
 
-    # Plain direct MCDA on observed combined matrix
     x_plain = aggregate_mean(g_obs, i_obs)
 
     rows.append(
@@ -550,8 +521,14 @@ def run_test(n_mc=100000, sigma=0.95, seed=42):
     scenarios = {}
 
     # 1) Correlated + reliability-scaled Gaussian stress
-    eps_g = add_group_correlated_noise(rng, sigma, g_true_raw.shape) + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G)
-    eps_i = add_group_correlated_noise(rng, sigma, i_true_raw.shape) + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I)
+    eps_g = (
+        add_group_correlated_noise(rng, sigma, g_true_raw.shape)
+        + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G)
+    )
+    eps_i = (
+        add_group_correlated_noise(rng, sigma, i_true_raw.shape)
+        + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I)
+    )
     g_obs = g_true_raw + eps_g
     i_obs = i_true_raw + eps_i
     scenarios["correlated_reliability"] = (g_obs, i_obs)
@@ -573,14 +550,14 @@ def run_test(n_mc=100000, sigma=0.95, seed=42):
 
     # 4) Full stress
     eps_g = (
-        add_group_correlated_noise(rng, sigma, g_true_raw.shape) +
-        add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G) +
-        add_asymmetric_bias(rng, sigma, g_true_raw.shape)
+        add_group_correlated_noise(rng, sigma, g_true_raw.shape)
+        + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G)
+        + add_asymmetric_bias(rng, sigma, g_true_raw.shape)
     )
     eps_i = (
-        add_group_correlated_noise(rng, sigma, i_true_raw.shape) +
-        add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I) +
-        add_asymmetric_bias(rng, sigma, i_true_raw.shape)
+        add_group_correlated_noise(rng, sigma, i_true_raw.shape)
+        + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I)
+        + add_asymmetric_bias(rng, sigma, i_true_raw.shape)
     )
 
     g_obs = g_true_raw + eps_g
@@ -590,8 +567,33 @@ def run_test(n_mc=100000, sigma=0.95, seed=42):
     i_obs = inject_outliers(rng, i_obs, p_outlier=0.035, magnitude=3.8)
     g_obs = inject_missingness(rng, g_obs, p_missing=0.10)
     i_obs = inject_missingness(rng, i_obs, p_missing=0.10)
-
     scenarios["full_stress"] = (g_obs, i_obs)
+
+    # 5) Breakdown limit: near-structural-failure regime
+    eps_g = (
+        add_group_correlated_noise(rng, sigma * 1.8, g_true_raw.shape)
+        + add_heavytail_noise(rng, sigma * 1.6, g_true_raw.shape, df=2)
+        + add_reliability_scaled_noise(rng, sigma * 1.4, g_true_raw.shape, RELIABILITY_G)
+    )
+    eps_i = (
+        add_group_correlated_noise(rng, sigma * 1.8, i_true_raw.shape)
+        + add_heavytail_noise(rng, sigma * 1.6, i_true_raw.shape, df=2)
+        + add_reliability_scaled_noise(rng, sigma * 1.4, i_true_raw.shape, RELIABILITY_I)
+    )
+
+    g_obs = g_true_raw + eps_g
+    i_obs = i_true_raw + eps_i
+    g_obs, i_obs = inject_regime_conflict_shift(rng, g_obs, i_obs, strength=1.40)
+    g_obs = inject_outliers(rng, g_obs, p_outlier=0.10, magnitude=4.5)
+    i_obs = inject_outliers(rng, i_obs, p_outlier=0.10, magnitude=4.5)
+    g_obs = inject_missingness(rng, g_obs, p_missing=0.22)
+    i_obs = inject_missingness(rng, i_obs, p_missing=0.22)
+
+    # keep raw values partially outside the nominal scale so boundary stress is visible
+    g_obs = np.clip(g_obs, -2.0, 12.0)
+    i_obs = np.clip(i_obs, -2.0, 12.0)
+
+    scenarios["breakdown_limit"] = (g_obs, i_obs)
 
     all_rows = []
 
