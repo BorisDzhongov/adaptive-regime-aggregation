@@ -39,8 +39,18 @@ jobs:
             echo "FINISHED: $f"
           done < test_list.txt
 
+      - name: Show generated result files
+        run: |
+          echo "Generated files under extended_tests/results:"
+          if [ -d extended_tests/results ]; then
+            find extended_tests/results -type f | sort
+          else
+            echo "No extended_tests/results directory found."
+          fi
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: ara-extended-results
-          path: extended_tests/results
+          path: extended_tests/results/**
+          if-no-files-found: warn
