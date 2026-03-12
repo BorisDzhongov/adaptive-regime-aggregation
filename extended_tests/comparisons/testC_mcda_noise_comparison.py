@@ -48,8 +48,10 @@ M, N_PROJECTS = G.shape
 # ---------------------------------------------------------------------
 CRITERION_SIGN = np.array([1, 1, -1, 1, -1, 1, 1, -1, -1, 1, 1], dtype=float)
 
-RELIABILITY_G = np.array([0.92, 0.88, 0.72, 0.85, 0.76, 0.90, 0.82, 0.68, 0.65, 0.80, 0.91], dtype=float)
-RELIABILITY_I = np.array([0.80, 0.86, 0.70, 0.83, 0.74, 0.78, 0.79, 0.64, 0.60, 0.76, 0.88], dtype=float)
+# Hidden reliability used only by the data-generating process.
+# ARA and the baselines do NOT get direct access to these values.
+HIDDEN_RELIABILITY_G = np.array([0.92, 0.88, 0.72, 0.85, 0.76, 0.90, 0.82, 0.68, 0.65, 0.80, 0.91], dtype=float)
+HIDDEN_RELIABILITY_I = np.array([0.80, 0.86, 0.70, 0.83, 0.74, 0.78, 0.79, 0.64, 0.60, 0.76, 0.88], dtype=float)
 
 GROUPS = {
     "economic": [0, 1, 4],
@@ -78,9 +80,6 @@ def aggregate_mean(g, i):
 
 def winner_entropy(freq):
     return -np.sum(freq * np.log(freq + 1e-12))
-
-def expand_prior_reliability(rel_1d, shape):
-    return np.repeat(rel_1d[:, None, None], shape[1], axis=1).repeat(shape[2], axis=2)
 
 # ---------------------------------------------------------------------
 # Tie-aware utilities
@@ -145,12 +144,13 @@ def score_mean(x):
 
 def score_topsis(x):
     x = safe_fill_nan_with_criterion_mean(x)
+    n_criteria = x.shape[0]
 
     denom = np.sqrt(np.sum(x ** 2, axis=1, keepdims=True))
     denom = np.where(denom == 0.0, 1.0, denom)
 
     r = x / denom
-    v = r / M
+    v = r / n_criteria
 
     ideal_best = np.max(v, axis=1, keepdims=True)
     ideal_worst = np.min(v, axis=1, keepdims=True)
@@ -222,7 +222,8 @@ def score_electre_i(x, concordance_threshold=0.60, discordance_threshold=0.40):
     return phi_plus - phi_minus
 
 # ---------------------------------------------------------------------
-# Reliability interpretation for ARA
+# Observation-based reliability estimation
+# No hidden priors are used here.
 # ---------------------------------------------------------------------
 def boundary_stress_indicator(raw):
     raw_filled = np.where(np.isnan(raw), L, raw)
@@ -248,21 +249,45 @@ def group_instability_indicator(x_benefit):
 
     return penalty
 
-def interpret_reliability(raw_obs, benefit_obs, prior_rel_1d):
-    prior = expand_prior_reliability(prior_rel_1d, raw_obs.shape)
+def local_dispersion_indicator(x_benefit):
+    x = safe_fill_nan_with_criterion_mean(x_benefit)
 
+    med = np.median(x, axis=1, keepdims=True)
+    dev = np.abs(x - med)
+    mad = np.median(dev, axis=1, keepdims=True)
+
+    # Larger local dispersion -> lower confidence.
+    return np.clip(mad / 2.5, 0.0, 1.0)
+
+def estimate_reliability_from_observations(raw_obs, benefit_obs):
     missing_pen = np.isnan(raw_obs).astype(float)
     boundary_pen = boundary_stress_indicator(raw_obs)
     group_pen = group_instability_indicator(benefit_obs)
+    dispersion_pen = local_dispersion_indicator(benefit_obs)
 
     rel = (
-        0.70 * prior
-        + 0.15 * (1.0 - missing_pen)
-        + 0.10 * (1.0 - boundary_pen)
-        + 0.05 * (1.0 - group_pen)
+        0.35 * (1.0 - missing_pen)
+        + 0.25 * (1.0 - boundary_pen)
+        + 0.20 * (1.0 - group_pen)
+        + 0.20 * (1.0 - dispersion_pen)
     )
 
     return np.clip(rel, 0.0, 1.0)
+
+def estimated_reliability_fusion(g_obs_raw, i_obs_raw):
+    g_obs = to_benefit_space(clip010(g_obs_raw))
+    i_obs = to_benefit_space(clip010(i_obs_raw))
+
+    g_obs = safe_fill_nan_with_criterion_mean(g_obs)
+    i_obs = safe_fill_nan_with_criterion_mean(i_obs)
+
+    rel_g = estimate_reliability_from_observations(g_obs_raw, g_obs)
+    rel_i = estimate_reliability_from_observations(i_obs_raw, i_obs)
+
+    denom = rel_g + rel_i + 1e-12
+    x_rel = (rel_g * g_obs + rel_i * i_obs) / denom
+
+    return x_rel, rel_g, rel_i
 
 # ---------------------------------------------------------------------
 # ARA
@@ -291,16 +316,14 @@ def ara_adaptive_operator(g_obs_raw, i_obs_raw, ell=L):
     g_obs = safe_fill_nan_with_criterion_mean(g_obs)
     i_obs = safe_fill_nan_with_criterion_mean(i_obs)
 
-    rel_g = interpret_reliability(
+    rel_g = estimate_reliability_from_observations(
         raw_obs=g_obs_raw,
         benefit_obs=g_obs,
-        prior_rel_1d=RELIABILITY_G,
     )
 
-    rel_i = interpret_reliability(
+    rel_i = estimate_reliability_from_observations(
         raw_obs=i_obs_raw,
         benefit_obs=i_obs,
-        prior_rel_1d=RELIABILITY_I,
     )
 
     alpha = select_adaptive_alpha_from_reliability(rel_g, rel_i)
@@ -320,13 +343,10 @@ def alpha_shares(alpha):
 
 # ---------------------------------------------------------------------
 # Oracle
+# Independent from ARA: no reliability priors, no phi logic, no anchor.
 # ---------------------------------------------------------------------
 def oracle_scores(g_true, i_true):
-    prior_g = expand_prior_reliability(RELIABILITY_G, g_true.shape)
-    prior_i = expand_prior_reliability(RELIABILITY_I, i_true.shape)
-
-    denom = prior_g + prior_i + 1e-12
-    x = (prior_g * g_true + prior_i * i_true) / denom
+    x = 0.5 * (g_true + i_true)
     return score_mean(x)
 
 # ---------------------------------------------------------------------
@@ -428,53 +448,79 @@ def evaluate_single_method(method_name, scores, oracle, extra=None):
 
     return row
 
-def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
+def score_all_mcda_variants(x, oracle, prefix):
+    rows = []
+
+    rows.append(
+        evaluate_single_method(
+            method_name=f"WSM_{prefix}",
+            scores=score_mean(x),
+            oracle=oracle,
+        )
+    )
+
+    rows.append(
+        evaluate_single_method(
+            method_name=f"TOPSIS_{prefix}",
+            scores=score_topsis(x),
+            oracle=oracle,
+        )
+    )
+
+    rows.append(
+        evaluate_single_method(
+            method_name=f"PROMETHEE_II_{prefix}",
+            scores=score_promethee_ii(x),
+            oracle=oracle,
+        )
+    )
+
+    rows.append(
+        evaluate_single_method(
+            method_name=f"ELECTRE_I_{prefix}",
+            scores=score_electre_i(x),
+            oracle=oracle,
+        )
+    )
+
+    return rows
+
+def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true, rng):
     g_obs = to_benefit_space(clip010(g_obs_raw))
     i_obs = to_benefit_space(clip010(i_obs_raw))
 
     oracle = oracle_scores(g_true, i_true)
     rows = []
 
+    # ARA on separated regimes with observation-estimated reliability
     x_ara, alpha, rel_g, rel_i = ara_adaptive_operator(g_obs_raw, i_obs_raw)
     rows.append(
         evaluate_single_method(
-            method_name="ARA_adaptive_reliability",
+            method_name="ARA_adaptive_estimated_reliability",
             scores=score_mean(x_ara),
             oracle=oracle,
             extra=alpha_shares(alpha),
         )
     )
 
+    # Pooled mean baseline
     x_plain = aggregate_mean(g_obs, i_obs)
+    rows.extend(score_all_mcda_variants(x_plain, oracle, prefix="pooled"))
 
+    # Estimated-reliability fusion baseline
+    x_rel, rel_g_est, rel_i_est = estimated_reliability_fusion(g_obs_raw, i_obs_raw)
+    rows.extend(score_all_mcda_variants(x_rel, oracle, prefix="relfusion"))
+
+    # Stacked-regime baseline (same observed information, no adaptive operator)
+    x_stack = np.concatenate([g_obs, i_obs], axis=0)
+    rows.extend(score_all_mcda_variants(x_stack, oracle, prefix="stacked"))
+
+    # Random baseline
+    random_scores = rng.random((N_PROJECTS, g_true.shape[2]))
     rows.append(
         evaluate_single_method(
-            method_name="WSM_direct",
-            scores=score_mean(x_plain),
-            oracle=oracle,
-        )
-    )
-
-    rows.append(
-        evaluate_single_method(
-            method_name="TOPSIS_direct",
-            scores=score_topsis(x_plain),
-            oracle=oracle,
-        )
-    )
-
-    rows.append(
-        evaluate_single_method(
-            method_name="PROMETHEE_II_direct",
-            scores=score_promethee_ii(x_plain),
-            oracle=oracle,
-        )
-    )
-
-    rows.append(
-        evaluate_single_method(
-            method_name="ELECTRE_I_direct",
-            scores=score_electre_i(x_plain),
+            method_name="RANDOM_baseline",
+            scores=random_scores,
             oracle=oracle,
         )
     )
@@ -532,7 +578,7 @@ def print_summary(rows):
 
         for r in scenario_rows:
             print(
-                f"{r['method']:28s} | "
+                f"{r['method']:36s} | "
                 f"acc={r['accuracy_vs_oracle']:.4f} | "
                 f"mean_regret={r['mean_regret']:.6f} | "
                 f"p95={r['p95_regret']:.6f} | "
@@ -540,7 +586,7 @@ def print_summary(rows):
                 f"entropy={r['winner_entropy']:.6f}"
             )
 
-            if r["method"] == "ARA_adaptive_reliability":
+            if r["method"] == "ARA_adaptive_estimated_reliability":
                 print(
                     "   alpha shares: "
                     f"phi^-2={float(r['share_phi_inv2']):.4f}, "
@@ -563,16 +609,21 @@ def run_test(n_mc=100000, sigma=0.95, seed=42, truth_sigma=0.35):
 
     scenarios = {}
 
+    # Clean reference scenario
+    scenarios["clean"] = (g_true_raw.copy(), i_true_raw.copy())
+
+    # Correlated reliability stress
     eps_g = (
         add_group_correlated_noise(rng, sigma, g_true_raw.shape)
-        + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G)
+        + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, HIDDEN_RELIABILITY_G)
     )
     eps_i = (
         add_group_correlated_noise(rng, sigma, i_true_raw.shape)
-        + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I)
+        + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, HIDDEN_RELIABILITY_I)
     )
     scenarios["correlated_reliability"] = (g_true_raw + eps_g, i_true_raw + eps_i)
 
+    # Asymmetric conflict
     eps_g = add_asymmetric_bias(rng, sigma, g_true_raw.shape)
     eps_i = add_asymmetric_bias(rng, sigma, i_true_raw.shape)
     g_obs = g_true_raw + eps_g
@@ -580,20 +631,22 @@ def run_test(n_mc=100000, sigma=0.95, seed=42, truth_sigma=0.35):
     g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.85)
     scenarios["asymmetric_conflict"] = (g_obs, i_obs)
 
+    # Heavy-tail + outliers
     eps_g = add_heavytail_noise(rng, sigma, g_true_raw.shape, df=3)
     eps_i = add_heavytail_noise(rng, sigma, i_true_raw.shape, df=3)
     g_obs = inject_outliers(rng, g_true_raw + eps_g, p_outlier=0.03, magnitude=3.5)
     i_obs = inject_outliers(rng, i_true_raw + eps_i, p_outlier=0.03, magnitude=3.5)
     scenarios["heavytail_outliers"] = (g_obs, i_obs)
 
+    # Full stress
     eps_g = (
         add_group_correlated_noise(rng, sigma, g_true_raw.shape)
-        + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, RELIABILITY_G)
+        + add_reliability_scaled_noise(rng, sigma, g_true_raw.shape, HIDDEN_RELIABILITY_G)
         + add_asymmetric_bias(rng, sigma, g_true_raw.shape)
     )
     eps_i = (
         add_group_correlated_noise(rng, sigma, i_true_raw.shape)
-        + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I)
+        + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, HIDDEN_RELIABILITY_I)
         + add_asymmetric_bias(rng, sigma, i_true_raw.shape)
     )
 
@@ -606,15 +659,16 @@ def run_test(n_mc=100000, sigma=0.95, seed=42, truth_sigma=0.35):
     i_obs = inject_missingness(rng, i_obs, p_missing=0.10)
     scenarios["full_stress"] = (g_obs, i_obs)
 
+    # Breakdown limit
     eps_g = (
         add_group_correlated_noise(rng, sigma * 1.8, g_true_raw.shape)
         + add_heavytail_noise(rng, sigma * 1.6, g_true_raw.shape, df=2)
-        + add_reliability_scaled_noise(rng, sigma * 1.4, g_true_raw.shape, RELIABILITY_G)
+        + add_reliability_scaled_noise(rng, sigma * 1.4, g_true_raw.shape, HIDDEN_RELIABILITY_G)
     )
     eps_i = (
         add_group_correlated_noise(rng, sigma * 1.8, i_true_raw.shape)
         + add_heavytail_noise(rng, sigma * 1.6, i_true_raw.shape, df=2)
-        + add_reliability_scaled_noise(rng, sigma * 1.4, i_true_raw.shape, RELIABILITY_I)
+        + add_reliability_scaled_noise(rng, sigma * 1.4, i_true_raw.shape, HIDDEN_RELIABILITY_I)
     )
 
     g_obs = g_true_raw + eps_g
@@ -625,6 +679,8 @@ def run_test(n_mc=100000, sigma=0.95, seed=42, truth_sigma=0.35):
     g_obs = inject_missingness(rng, g_obs, p_missing=0.22)
     i_obs = inject_missingness(rng, i_obs, p_missing=0.22)
 
+    # Keep some values outside [0,10] before clipping inside methods,
+    # so the observation-based reliability estimator can detect boundary stress.
     g_obs = np.clip(g_obs, -2.0, 12.0)
     i_obs = np.clip(i_obs, -2.0, 12.0)
 
@@ -633,12 +689,12 @@ def run_test(n_mc=100000, sigma=0.95, seed=42, truth_sigma=0.35):
     all_rows = []
 
     for scenario_name, (g_obs, i_obs) in scenarios.items():
-        rows = evaluate_methods(g_obs, i_obs, g_true, i_true)
+        rows = evaluate_methods(g_obs, i_obs, g_true, i_true, rng)
         for row in rows:
             row["scenario"] = scenario_name
         all_rows.extend(rows)
 
-    output_path = "extended_tests/results/csv/testC_adaptive_ara_vs_mcda_stress.csv"
+    output_path = "extended_tests/results/csv/testC_fair_adaptive_ara_vs_mcda_stress.csv"
     save_csv(all_rows, output_path)
     print_summary(all_rows)
 
