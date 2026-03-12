@@ -11,10 +11,28 @@ import numpy as np
 #   3) reliable_vs_biased
 #   4) complementary_local_reliability
 #
-# Goal:
-#   Show that ARA is not "always best", but has a structural
-#   advantage when reliable information exists under noise,
-#   asymmetry, or heterogeneous local reliability.
+# Purpose:
+#   Evaluate whether ARA's reliability-aware adaptive coordination
+#   provides an advantage when subsystem reliability is structurally
+#   relevant (noise, bias, heterogeneous local reliability), while
+#   avoiding claims of universal superiority.
+#
+# Methodological note:
+#   This benchmark is intentionally asymmetric in information structure.
+#   ARA receives local reliability signals (Rg, Ri) because the purpose
+#   of the test is to evaluate whether reliability-aware coordination
+#   adds value when such structure is available.
+#
+#   Classical MCDA baselines operate on pooled observed scores only.
+#   They do not receive local cell-level reliability coordination,
+#   because giving them that information would partially import ARA's
+#   adaptive architecture into the baseline itself.
+#
+#   Therefore, this test does NOT claim:
+#       "ARA is universally superior to MCDA methods."
+#   It tests the narrower claim:
+#       "ARA has structural advantage when reliability information is
+#        available and materially relevant to aggregation."
 # ============================================================
 
 PHI = (1 + 5 ** 0.5) / 2
@@ -120,7 +138,15 @@ def electre_i_scores(X, concordance_threshold=0.60, discordance_threshold=0.30):
 # ARA adaptive reliability logic
 # ------------------------------------------------------------
 def choose_alpha(r_g, r_i):
-    # Regime chosen only from relative reliability.
+    """
+    Regime selection based only on relative subsystem reliability.
+
+    This is a deliberately explicit hand-crafted policy:
+    it maps relative reliability share into one of the five
+    ARA regimes. The benchmark therefore tests not only the
+    ARA aggregation structure, but also this concrete adaptive
+    reliability-to-regime rule.
+    """
     share_i = r_i / (r_g + r_i + 1e-12)
 
     if share_i >= 0.80:
@@ -135,6 +161,16 @@ def choose_alpha(r_g, r_i):
 
 
 def ara_adaptive_scores(G, I, Rg, Ri, anchor=ANCHOR, anchor_weight=0.25):
+    """
+    Reliability-aware ARA aggregation.
+
+    Important methodological note:
+    ARA uses both observed subsystem scores and local reliability signals.
+    It also includes an anchor term for stabilization. Classical baselines
+    below do not include such an anchor, so this benchmark should be read
+    as an architectural comparison under asymmetric information structure,
+    not as a strict equal-information contest.
+    """
     K, P = G.shape
     X = np.zeros((K, P), dtype=float)
     regime_counts = {k: 0 for k in REGIMES.keys()}
@@ -159,7 +195,11 @@ def scenario_balanced_reliable(rng):
     """
     Control scenario:
     Both subsystems are reliable, low-noise, and centered around truth.
-    ARA should not force artificial dominance here.
+
+    Desired interpretation:
+    ARA should not exhibit artificial dominance here. If ARA were to
+    dominate strongly in this control case, that would suggest that the
+    benchmark is overfitting the architecture rather than testing it fairly.
     """
     truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
 
@@ -175,7 +215,9 @@ def scenario_balanced_reliable(rng):
 def scenario_reliable_vs_noisy(rng):
     """
     One subsystem is globally reliable; the other is much noisier.
-    This tests whether ARA preserves the reliable signal better than pooling.
+
+    This tests whether reliability-aware aggregation preserves the stronger
+    signal better than naive pooling.
     """
     truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
 
@@ -199,7 +241,9 @@ def scenario_reliable_vs_noisy(rng):
 
 def scenario_reliable_vs_biased(rng):
     """
-    One subsystem is reliable; the other is systematically biased upward or downward.
+    One subsystem is reliable; the other is systematically biased upward
+    or downward.
+
     This is stronger than pure noise because the distortion is directional.
     """
     truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
@@ -226,8 +270,12 @@ def scenario_reliable_vs_biased(rng):
 
 def scenario_complementary_local_reliability(rng):
     """
-    For each cell, at least one subsystem is reliable, but reliability varies locally.
-    This is the main adaptive scenario: ARA should exploit local structure.
+    For each cell, at least one subsystem is reliable, but reliability
+    varies locally across criteria and projects.
+
+    This is the main adaptive scenario. It is intentionally constructed
+    so that local reliability structure matters. Accordingly, it tests
+    whether ARA can exploit that structure better than non-adaptive pooling.
     """
     truth = rng.uniform(4.5, 7.5, size=(N_CRITERIA, N_PROJECTS))
 
@@ -245,7 +293,6 @@ def scenario_complementary_local_reliability(rng):
                 Ri[k, p] = 0.35
                 G_obs[k, p] = truth[k, p] + rng.normal(0.0, 0.20)
 
-                # noisy OR biased local distortion
                 if bool(rng.integers(0, 2)):
                     I_obs[k, p] = truth[k, p] + rng.normal(0.0, 1.40)
                 else:
@@ -267,12 +314,24 @@ def scenario_complementary_local_reliability(rng):
 
 # ------------------------------------------------------------
 # Benchmark input for classical MCDA
-# IMPORTANT:
-# Classical MCDA methods should NOT receive local reliability-aware
-# variable-by-variable coordination, because that would import
-# part of ARA's adaptive architecture into the baseline.
 # ------------------------------------------------------------
 def pooled_matrix_for_mcda(G, I):
+    """
+    Baseline pooled input for classical MCDA methods.
+
+    Important:
+    Baselines receive observed scores only, without local reliability-aware
+    coordination. This preserves the conceptual distinction between:
+
+        - non-adaptive pooling baselines
+        - reliability-aware adaptive ARA
+
+    If one wanted an even stronger benchmark family, one could add:
+        - global reliability-weighted pooling
+        - criterion-level weighted pooling
+    But not cell-level adaptive coordination, because that would largely
+    collapse the distinction being tested here.
+    """
     return 0.5 * (G + I)
 
 
@@ -312,7 +371,7 @@ def run_scenario(name, generator, n_reps=N_REPS):
             ara_regime_total[k] += v
         total_cells += N_CRITERIA * N_PROJECTS
 
-        # Classical methods on a non-adaptive pooled matrix
+        # Classical methods on pooled non-adaptive matrix
         X = pooled_matrix_for_mcda(G, I)
 
         method_scores = {
