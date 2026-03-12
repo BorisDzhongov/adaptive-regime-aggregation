@@ -76,14 +76,65 @@ def safe_fill_nan_with_criterion_mean(x):
 def aggregate_mean(g, i):
     return 0.5 * (g + i)
 
-def winners(scores):
-    return np.argmax(scores, axis=0)
-
 def winner_entropy(freq):
     return -np.sum(freq * np.log(freq + 1e-12))
 
 def expand_prior_reliability(rel_1d, shape):
     return np.repeat(rel_1d[:, None, None], shape[1], axis=1).repeat(shape[2], axis=2)
+
+# ---------------------------------------------------------------------
+# Tie-aware utilities
+# ---------------------------------------------------------------------
+def winner_mask(scores, tol=1e-10):
+    max_scores = np.max(scores, axis=0, keepdims=True)
+    return np.isclose(scores, max_scores, atol=tol, rtol=0.0)
+
+def tie_rate(scores, tol=1e-10):
+    wm = winner_mask(scores, tol=tol)
+    n_winners = np.sum(wm, axis=0)
+    return float(np.mean(n_winners > 1))
+
+def tie_aware_accuracy(scores, oracle_scores, tol=1e-10):
+    wm = winner_mask(scores, tol=tol)
+    oracle_wm = winner_mask(oracle_scores, tol=tol)
+
+    acc = []
+    for j in range(scores.shape[1]):
+        winners_j = np.where(wm[:, j])[0]
+        oracle_j = np.where(oracle_wm[:, j])[0]
+
+        overlap = len(set(winners_j).intersection(set(oracle_j)))
+        if overlap == 0:
+            acc.append(0.0)
+        else:
+            acc.append(overlap / len(winners_j))
+
+    return float(np.mean(acc))
+
+def tie_aware_regret(scores, oracle_scores, tol=1e-10):
+    wm = winner_mask(scores, tol=tol)
+
+    regrets = []
+    for j in range(scores.shape[1]):
+        winners_j = np.where(wm[:, j])[0]
+        best_oracle = float(np.max(oracle_scores[:, j]))
+        chosen_oracle_mean = float(np.mean(oracle_scores[winners_j, j]))
+        regrets.append(best_oracle - chosen_oracle_mean)
+
+    return np.array(regrets, dtype=float)
+
+def tie_aware_win_probabilities(scores, tol=1e-10):
+    wm = winner_mask(scores, tol=tol)
+    probs = np.zeros(scores.shape[0], dtype=float)
+
+    for j in range(scores.shape[1]):
+        winners_j = np.where(wm[:, j])[0]
+        share = 1.0 / len(winners_j)
+        for idx in winners_j:
+            probs[idx] += share
+
+    probs /= scores.shape[1]
+    return probs
 
 # ---------------------------------------------------------------------
 # MCDA scoring
@@ -279,6 +330,21 @@ def oracle_scores(g_true, i_true):
     return score_mean(x)
 
 # ---------------------------------------------------------------------
+# Latent truth variation
+# ---------------------------------------------------------------------
+def generate_latent_truth(rng, n_mc, truth_sigma=0.35):
+    g_true_raw = np.repeat(G[:, :, None], n_mc, axis=2)
+    i_true_raw = np.repeat(I[:, :, None], n_mc, axis=2)
+
+    latent_g = g_true_raw + rng.normal(0.0, truth_sigma, size=g_true_raw.shape)
+    latent_i = i_true_raw + rng.normal(0.0, truth_sigma, size=i_true_raw.shape)
+
+    latent_g = clip010(latent_g)
+    latent_i = clip010(latent_i)
+
+    return latent_g, latent_i
+
+# ---------------------------------------------------------------------
 # Noise / corruption generators
 # ---------------------------------------------------------------------
 def add_group_correlated_noise(rng, sigma, shape):
@@ -319,7 +385,7 @@ def inject_outliers(rng, x, p_outlier=0.025, magnitude=3.2):
     y[mask] = y[mask] + shocks[mask]
     return y
 
-def inject_regime_conflict_shift(rng, g, i, strength=0.9):
+def inject_regime_conflict_shift(g, i, strength=0.9):
     g2 = g.copy()
     i2 = i.copy()
 
@@ -335,22 +401,21 @@ def inject_regime_conflict_shift(rng, g, i, strength=0.9):
 # ---------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------
-def evaluate_single_method(method_name, scores, oracle, oracle_w, oracle_best, extra=None):
-    w = winners(scores)
-    chosen = oracle[w, np.arange(oracle.shape[1])]
-    regret = oracle_best - chosen
-    freq = np.bincount(w, minlength=N_PROJECTS) / oracle.shape[1]
+def evaluate_single_method(method_name, scores, oracle, extra=None):
+    regrets = tie_aware_regret(scores, oracle)
+    probs = tie_aware_win_probabilities(scores)
 
     row = {
         "method": method_name,
-        "accuracy_vs_oracle": float(np.mean(w == oracle_w)),
-        "mean_regret": float(np.mean(regret)),
-        "p95_regret": float(np.quantile(regret, 0.95)),
-        "winner_entropy": float(winner_entropy(freq)),
-        "P_win_A": float(freq[0]),
-        "P_win_B": float(freq[1]),
-        "P_win_C": float(freq[2]),
-        "P_win_D": float(freq[3]),
+        "accuracy_vs_oracle": tie_aware_accuracy(scores, oracle),
+        "mean_regret": float(np.mean(regrets)),
+        "p95_regret": float(np.quantile(regrets, 0.95)),
+        "winner_entropy": float(winner_entropy(probs)),
+        "tie_rate": tie_rate(scores),
+        "P_win_A": float(probs[0]),
+        "P_win_B": float(probs[1]),
+        "P_win_C": float(probs[2]),
+        "P_win_D": float(probs[3]),
         "share_phi_inv2": "",
         "share_phi_inv": "",
         "share_one": "",
@@ -368,9 +433,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
     i_obs = to_benefit_space(clip010(i_obs_raw))
 
     oracle = oracle_scores(g_true, i_true)
-    oracle_w = winners(oracle)
-    oracle_best = oracle[oracle_w, np.arange(oracle.shape[1])]
-
     rows = []
 
     x_ara, alpha, rel_g, rel_i = ara_adaptive_operator(g_obs_raw, i_obs_raw)
@@ -379,8 +441,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
             method_name="ARA_adaptive_reliability",
             scores=score_mean(x_ara),
             oracle=oracle,
-            oracle_w=oracle_w,
-            oracle_best=oracle_best,
             extra=alpha_shares(alpha),
         )
     )
@@ -392,8 +452,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
             method_name="WSM_direct",
             scores=score_mean(x_plain),
             oracle=oracle,
-            oracle_w=oracle_w,
-            oracle_best=oracle_best,
         )
     )
 
@@ -402,8 +460,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
             method_name="TOPSIS_direct",
             scores=score_topsis(x_plain),
             oracle=oracle,
-            oracle_w=oracle_w,
-            oracle_best=oracle_best,
         )
     )
 
@@ -412,8 +468,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
             method_name="PROMETHEE_II_direct",
             scores=score_promethee_ii(x_plain),
             oracle=oracle,
-            oracle_w=oracle_w,
-            oracle_best=oracle_best,
         )
     )
 
@@ -422,8 +476,6 @@ def evaluate_methods(g_obs_raw, i_obs_raw, g_true, i_true):
             method_name="ELECTRE_I_direct",
             scores=score_electre_i(x_plain),
             oracle=oracle,
-            oracle_w=oracle_w,
-            oracle_best=oracle_best,
         )
     )
 
@@ -445,6 +497,7 @@ def save_csv(rows, output_path):
         "mean_regret",
         "p95_regret",
         "winner_entropy",
+        "tie_rate",
         "P_win_A",
         "P_win_B",
         "P_win_C",
@@ -483,6 +536,7 @@ def print_summary(rows):
                 f"acc={r['accuracy_vs_oracle']:.4f} | "
                 f"mean_regret={r['mean_regret']:.6f} | "
                 f"p95={r['p95_regret']:.6f} | "
+                f"tie_rate={r['tie_rate']:.4f} | "
                 f"entropy={r['winner_entropy']:.6f}"
             )
 
@@ -499,11 +553,10 @@ def print_summary(rows):
 # ---------------------------------------------------------------------
 # Main stress test
 # ---------------------------------------------------------------------
-def run_test(n_mc=100000, sigma=0.95, seed=42):
+def run_test(n_mc=100000, sigma=0.95, seed=42, truth_sigma=0.35):
     rng = np.random.default_rng(seed)
 
-    g_true_raw = np.repeat(G[:, :, None], n_mc, axis=2)
-    i_true_raw = np.repeat(I[:, :, None], n_mc, axis=2)
+    g_true_raw, i_true_raw = generate_latent_truth(rng, n_mc=n_mc, truth_sigma=truth_sigma)
 
     g_true = to_benefit_space(g_true_raw)
     i_true = to_benefit_space(i_true_raw)
@@ -518,15 +571,13 @@ def run_test(n_mc=100000, sigma=0.95, seed=42):
         add_group_correlated_noise(rng, sigma, i_true_raw.shape)
         + add_reliability_scaled_noise(rng, sigma, i_true_raw.shape, RELIABILITY_I)
     )
-    g_obs = g_true_raw + eps_g
-    i_obs = i_true_raw + eps_i
-    scenarios["correlated_reliability"] = (g_obs, i_obs)
+    scenarios["correlated_reliability"] = (g_true_raw + eps_g, i_true_raw + eps_i)
 
     eps_g = add_asymmetric_bias(rng, sigma, g_true_raw.shape)
     eps_i = add_asymmetric_bias(rng, sigma, i_true_raw.shape)
     g_obs = g_true_raw + eps_g
     i_obs = i_true_raw + eps_i
-    g_obs, i_obs = inject_regime_conflict_shift(rng, g_obs, i_obs, strength=0.85)
+    g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=0.85)
     scenarios["asymmetric_conflict"] = (g_obs, i_obs)
 
     eps_g = add_heavytail_noise(rng, sigma, g_true_raw.shape, df=3)
@@ -548,7 +599,7 @@ def run_test(n_mc=100000, sigma=0.95, seed=42):
 
     g_obs = g_true_raw + eps_g
     i_obs = i_true_raw + eps_i
-    g_obs, i_obs = inject_regime_conflict_shift(rng, g_obs, i_obs, strength=1.00)
+    g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=1.00)
     g_obs = inject_outliers(rng, g_obs, p_outlier=0.035, magnitude=3.8)
     i_obs = inject_outliers(rng, i_obs, p_outlier=0.035, magnitude=3.8)
     g_obs = inject_missingness(rng, g_obs, p_missing=0.10)
@@ -568,7 +619,7 @@ def run_test(n_mc=100000, sigma=0.95, seed=42):
 
     g_obs = g_true_raw + eps_g
     i_obs = i_true_raw + eps_i
-    g_obs, i_obs = inject_regime_conflict_shift(rng, g_obs, i_obs, strength=1.40)
+    g_obs, i_obs = inject_regime_conflict_shift(g_obs, i_obs, strength=1.40)
     g_obs = inject_outliers(rng, g_obs, p_outlier=0.10, magnitude=4.5)
     i_obs = inject_outliers(rng, i_obs, p_outlier=0.10, magnitude=4.5)
     g_obs = inject_missingness(rng, g_obs, p_missing=0.22)
